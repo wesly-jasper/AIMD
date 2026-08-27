@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import Navbar from './components/Navbar';
 import MediaUploader from './components/MediaUploader';
 import PipelineTracker from './components/PipelineTracker';
+import ForensicViewer from './components/ForensicViewer';
 import DetectorSignals from './components/DetectorSignals';
 import EvidenceTable from './components/EvidenceTable';
 import ProvenanceViewer from './components/ProvenanceViewer';
@@ -12,6 +13,7 @@ import { ShieldCheck, ShieldAlert, FileText, History, RefreshCw, Layers } from '
 export default function App() {
   const [systemStatus, setSystemStatus] = useState(null);
   const [currentAnalysis, setCurrentAnalysis] = useState(null);
+  const [mediaDetails, setMediaDetails] = useState(null);
   const [detections, setDetections] = useState([]);
   const [evidencePackage, setEvidencePackage] = useState(null);
   const [provenance, setProvenance] = useState(null);
@@ -59,7 +61,18 @@ export default function App() {
         api.getReport(analysisId),
       ]);
 
-      if (analysisRes.status === 'fulfilled') setCurrentAnalysis(analysisRes.value);
+      if (analysisRes.status === 'fulfilled') {
+        const ana = analysisRes.value;
+        setCurrentAnalysis(ana);
+        if (ana?.media_id) {
+          try {
+            const m = await api.getMedia(ana.media_id);
+            setMediaDetails(m);
+          } catch {
+            setMediaDetails({ id: ana.media_id, media_type: ana.media_type || 'image' });
+          }
+        }
+      }
       if (detRes.status === 'fulfilled') setDetections(detRes.value?.detections || []);
       if (evRes.status === 'fulfilled') setEvidencePackage(evRes.value);
       if (provRes.status === 'fulfilled') setProvenance(provRes.value);
@@ -90,6 +103,7 @@ export default function App() {
 
   const handleNewCase = () => {
     setCurrentAnalysis(null);
+    setMediaDetails(null);
     setDetections([]);
     setEvidencePackage(null);
     setProvenance(null);
@@ -124,6 +138,13 @@ export default function App() {
             <PipelineTracker
               status={currentAnalysis.status}
               activeStage={9}
+            />
+
+            {/* Media Inspector Preview */}
+            <ForensicViewer
+              media={mediaDetails || { id: currentAnalysis.media_id, media_type: currentAnalysis.media_type || 'image' }}
+              detections={detections}
+              suspiciousSegments={currentAnalysis.suspicious_segments || []}
             />
 
             {/* Navigation Tabs */}

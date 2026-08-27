@@ -147,3 +147,59 @@ def test_full_pipeline_video(tmp_path):
     rep_data = rep_res.json()
     assert "markdown" in rep_data
     assert len(rep_data["markdown"]) > 100
+
+
+def test_full_pipeline_audio(tmp_path):
+    import wave
+    import struct
+
+    # Generate a simple 1-second 440Hz sine wave WAV file
+    audio_path = tmp_path / "pipeline_test.wav"
+    with wave.open(str(audio_path), "w") as wav_file:
+        wav_file.setnchannels(1)  # Mono
+        wav_file.setsampwidth(2)  # 16-bit
+        wav_file.setframerate(22050)
+        # 1 second of audio
+        for i in range(22050):
+            sample = int(32767.0 * 0.5 * np.sin(2.0 * np.pi * 440.0 * i / 22050))
+            wav_file.writeframes(struct.pack("<h", sample))
+
+    audio_bytes = audio_path.read_bytes()
+
+    # 1. Upload audio
+    upload_res = client.post(
+        "/api/v1/media/upload",
+        files={"file": ("pipeline_test.wav", audio_bytes, "audio/wav")},
+    )
+    assert upload_res.status_code == 200
+    upload_data = upload_res.json()
+    media_id = upload_data["media_id"]
+    assert media_id is not None
+    assert upload_data["media_type"] == "audio"
+
+    # 2. Run analysis pipeline
+    analysis_res = client.post(
+        "/api/v1/analysis/",
+        json={"media_id": media_id},
+    )
+    assert analysis_res.status_code == 200
+    analysis_id = analysis_res.json()["analysis_id"]
+
+    # 3. Verify analysis details
+    get_res = client.get(f"/api/v1/analysis/{analysis_id}")
+    assert get_res.status_code == 200
+    get_data = get_res.json()
+    assert get_data["media_id"] == media_id
+    assert get_data["status"] in ("COMPLETED", "PARTIAL")
+
+    # 4. Check evidence & report
+    ev_res = client.get(f"/api/v1/evidence/{analysis_id}")
+    assert ev_res.status_code == 200
+    ev_data = ev_res.json()
+    assert ev_data["media_evidence"]["media_type"] == "audio"
+
+    rep_res = client.get(f"/api/v1/report/{analysis_id}")
+    assert rep_res.status_code == 200
+    rep_data = rep_res.json()
+    assert "AIMD FORENSIC ANALYSIS REPORT" in rep_data["markdown"]
+

@@ -77,6 +77,32 @@ def get_media(
     }
 
 
+@router.get("/{media_id}/download", summary="Download/stream stored media file")
+def download_media(
+    media_id: str,
+    db: Session = Depends(get_db),
+):
+    """
+    Stream or download the original stored media file.
+    """
+    from fastapi.responses import FileResponse
+    from pathlib import Path
+
+    media = repo.get_media(db, media_id)
+    if not media:
+        raise HTTPException(status_code=404, detail=f"Media not found: {media_id}")
+
+    path = Path(media.file_path)
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="Underlying media file missing from storage")
+
+    return FileResponse(
+        str(path),
+        media_type=media.content_type or "application/octet-stream",
+        filename=media.original_filename,
+    )
+
+
 @router.get("/", summary="List uploaded media")
 def list_media(
     limit: int = 20,
