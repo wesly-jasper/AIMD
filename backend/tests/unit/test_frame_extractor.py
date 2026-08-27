@@ -39,8 +39,12 @@ def test_extract_frames(tmp_path):
     assert result["saved_count"]==5
     assert len(result["frames"])==5
 
-    for frame_path in result["frames"]:
+    for frame in result["frames"]:
+        frame_path = frame["file_path"] if isinstance(frame, dict) else frame
         assert Path(frame_path).exists()
+        if isinstance(frame, dict):
+            assert "timestamp_seconds" in frame
+            assert "frame_index" in frame
 
 
 def test_extract_every_second_frame(tmp_path):

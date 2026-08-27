@@ -1,48 +1,88 @@
 from pathlib import Path
-from pydantic_settings import BaseSettings,SettingsConfigDict
+from typing import List, Optional
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
-BASE_DIR=Path(__file__).resolve().parents[2]
+BASE_DIR = Path(__file__).resolve().parents[2]
 
 
 class Settings(BaseSettings):
-    app_name:str="AIMD"
-    app_version:str="1.0.0"
+    # ── Application ──────────────────────────────────────────────────────────
+    app_name: str = "AIMD"
+    app_version: str = "1.0.0"
+    log_level: str = "INFO"
 
-    upload_dir:Path=BASE_DIR/"uploads"
-    processed_dir:Path=BASE_DIR/"processed"
+    # ── Storage ───────────────────────────────────────────────────────────────
+    upload_dir: Path = BASE_DIR / "uploads"
+    processed_dir: Path = BASE_DIR / "processed"
+    frames_dir: Path = BASE_DIR / "processed" / "frames"
+    keyframes_dir: Path = BASE_DIR / "processed" / "keyframes"
 
-    frames_dir:Path=BASE_DIR/"processed"/"frames"
-    keyframes_dir:Path=BASE_DIR/"processed"/"keyframes"
+    max_file_size_mb: int = 500
 
-    trufor_model_path:Path|None=None
-    trufor_enabled:bool=False
+    # ── Database ──────────────────────────────────────────────────────────────
+    # SQLite for local dev; set DATABASE_URL=postgresql+psycopg2://... for prod
+    database_url: str = f"sqlite:///{BASE_DIR}/aimd.db"
 
-    max_file_size_mb:int=500
+    # ── CORS ──────────────────────────────────────────────────────────────────
+    cors_origins: List[str] = [
+        "http://localhost:5173",
+        "http://localhost:3000",
+        "http://localhost:8080",
+    ]
 
-    allowed_image_types:list[str]=[
+    # ── Media Types ───────────────────────────────────────────────────────────
+    allowed_image_types: List[str] = [
         "image/jpeg",
         "image/png",
-        "image/webp"
+        "image/webp",
+        "image/tiff",
     ]
-
-    allowed_video_types:list[str]=[
+    allowed_video_types: List[str] = [
         "video/mp4",
         "video/avi",
+        "video/quicktime",  # .mov
+        "video/x-msvideo",  # .avi
+        "video/x-matroska",  # .mkv
         "video/mov",
-        "video/mkv"
+        "video/mkv",
     ]
-
-    allowed_audio_types:list[str]=[
+    allowed_audio_types: List[str] = [
         "audio/wav",
+        "audio/x-wav",
+        "audio/mpeg",    # .mp3
         "audio/mp3",
-        "audio/mpeg"
+        "audio/aac",
+        "audio/x-m4a",
+        "audio/m4a",
+        "audio/mp4",
     ]
 
-    model_config=SettingsConfigDict(
+    # ── Frame extraction ──────────────────────────────────────────────────────
+    # How many frames per second to sample for analysis (not native FPS)
+    analysis_fps: float = 1.0
+    max_keyframes: int = 50
+
+    # ── Optional ML models ────────────────────────────────────────────────────
+    trufor_enabled: bool = False
+    trufor_model_path: Optional[Path] = None
+
+    # ── External search providers ─────────────────────────────────────────────
+    google_vision_api_key: Optional[str] = None
+    tineye_api_key: Optional[str] = None
+
+    model_config = SettingsConfigDict(
         env_file=".env",
-        extra="ignore"
+        extra="ignore",
     )
 
+    @property
+    def all_allowed_types(self) -> List[str]:
+        return (
+            self.allowed_image_types
+            + self.allowed_video_types
+            + self.allowed_audio_types
+        )
 
-settings=Settings()
+
+settings = Settings()

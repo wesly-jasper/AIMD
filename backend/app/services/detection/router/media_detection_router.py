@@ -44,4 +44,7 @@ class MediaDetectionRouter:
         raise ValueError(
             f"Unsupported media type: {media_type}"
         )
+
+    # Alias for pipeline routing
+    route = detect
     

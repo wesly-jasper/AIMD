@@ -1,0 +1,104 @@
+# ==========================================
+# AIMD Platform — Git Ignore Configuration
+# ==========================================
+
+# ── Python & Bytecode ──────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# ── Virtual Environments ──────────────────
+venv/
+.venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+
+# ── Testing, Coverage & Type Checking ──────
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+.hypothesis/
+.mypy_cache/
+.ruff_cache/
+
+# ── Environment & Secrets ──────────────────
+.env
+.env.local
+.env.*.local
+*.env
+!*.env.example
+
+# ── Database & SQLite ─────────────────────
+*.db
+*.sqlite
+*.sqlite3
+aimd.db
+backend/aimd.db
+
+# ── Media Ingestion & Processed Storage ────
+uploads/
+backend/uploads/
+processed/
+backend/processed/
+frames/
+backend/frames/
+keyframes/
+backend/keyframes/
+storage/
+backend/storage/
+
+# ── Test Artifacts & Temporary Files ──────
+*.log
+scratch/
+tmp/
+temp/
+test.jpg
+test.png
+test.mp4
+test_sample.*
+backend/test.jpg
+backend/test.png
+backend/test.mp4
+
+# ── Node & Frontend ───────────────────────
+node_modules/
+frontend/node_modules/
+frontend/dist/
+dist-ssr/
+*.local
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# ── IDEs & Operating System ────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+desktop.ini
