@@ -1,5 +1,5 @@
 """
-Forensic Report Generator — human-readable Markdown and structured JSON.
+Forensic Report Generator -- human-readable Markdown and structured JSON.
 
 Structures reports into clear forensic sections with strict evidential labeling:
   [FACT]        - Cryptographic hashes, file sizes, EXIF data, container metadata.
@@ -199,7 +199,7 @@ class ReportGenerator:
             f"- **Nodes:** `{len(provenance.get('nodes', []))}` | **Edges:** `{len(provenance.get('edges', []))}`",
         ])
         for edge in provenance.get("edges", [])[:5]:
-            lines.append(f"- `{edge.get('source')}` → `{edge.get('relationship')}` → `{edge.get('target')}` (confidence: `{edge.get('confidence', 0.5):.2%}`)")
+            lines.append(f"- `{edge.get('source')}` -> `{edge.get('relationship')}` -> `{edge.get('target')}` (confidence: `{edge.get('confidence', 0.5):.2%}`)")
         lines.append("")
 
         lines.extend([
@@ -236,7 +236,7 @@ class ReportGenerator:
             "",
             "---",
             "",
-            "*(End of Official Forensic Analysis Report — AIMD Platform)*",
+            "*(End of Official Forensic Analysis Report -- AIMD Platform)*",
         ])
 
         return "\n".join(lines)

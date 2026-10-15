@@ -21,7 +21,7 @@ async def upload_media(
     Validates the file type using magic bytes, stores it securely,
     computes SHA-256, and persists a MediaRecord to the database.
 
-    Returns the media_id — use this with POST /api/v1/analysis to run analysis.
+    Returns the media_id -- use this with POST /api/v1/analysis to run analysis.
     """
     try:
         result = await _service.ingest(file, db=db)

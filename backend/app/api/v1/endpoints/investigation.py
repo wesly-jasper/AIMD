@@ -1,7 +1,7 @@
 """
-/api/v1/ — Investigation endpoints (fingerprint, similarity, source, provenance, evidence, report).
+/api/v1/ -- Investigation endpoints (fingerprint, similarity, source, provenance, evidence, report).
 
-All GET endpoints read from the database — no in-memory state.
+All GET endpoints read from the database -- no in-memory state.
 POST endpoints are available for standalone operations outside the full pipeline.
 """
 from fastapi import APIRouter, Depends, HTTPException
@@ -216,7 +216,7 @@ def get_evidence(
 ):
     """
     Returns the complete forensic evidence package.
-    All values come from the database — no mock data.
+    All values come from the database -- no mock data.
     """
     analysis = repo.get_analysis(db, analysis_id)
     if not analysis:
@@ -268,3 +268,76 @@ def get_report(
         }
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Report generation error: {exc}")
+
+
+@router.get("/report/{analysis_id}/json", summary="Download JSON report")
+def get_report_json(analysis_id: str, db: Session = Depends(get_db)):
+    analysis = repo.get_analysis(db, analysis_id)
+    if not analysis:
+        raise HTTPException(status_code=404, detail=f"Analysis not found: {analysis_id}")
+    try:
+        pkg = _evidence_service.build_evidence_package(analysis_id, db)
+        return _report_generator.generate_json_report(pkg)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@router.get("/report/{analysis_id}/html", summary="Download HTML report")
+def get_report_html(analysis_id: str, db: Session = Depends(get_db)):
+    from fastapi.responses import HTMLResponse
+
+    analysis = repo.get_analysis(db, analysis_id)
+    if not analysis:
+        raise HTTPException(status_code=404, detail=f"Analysis not found: {analysis_id}")
+    try:
+        pkg = _evidence_service.build_evidence_package(analysis_id, db)
+        md = _report_generator.generate_markdown_report(pkg)
+        # Simple markdown to HTML
+        html = f"<html><head><meta charset='utf-8'><title>AIMD Report {analysis_id}</title>"
+        html += "<style>body{font-family:system-ui;max-width:800px;margin:40px auto;padding:20px;line-height:1.6;color:#0f172a} h1{color:#0e7490} h2{color:#334155;border-bottom:1px solid #e2e8f0;padding-bottom:6px} code{background:#f1f5f9;padding:2px 6px;border-radius:4px} pre{background:#0f172a;color:#e2e8f0;padding:16px;border-radius:8px;overflow:auto}</style></head><body>"
+        html += "<h1>AIMD Forensic Report</h1>"
+        # Very light markdown rendering
+        import re
+
+        html_body = md
+        html_body = re.sub(r"^### (.*)$", r"<h3>\1</h3>", html_body, flags=re.MULTILINE)
+        html_body = re.sub(r"^## (.*)$", r"<h2>\1</h2>", html_body, flags=re.MULTILINE)
+        html_body = re.sub(r"^# (.*)$", r"<h1>\1</h1>", html_body, flags=re.MULTILINE)
+        html_body = re.sub(r"\*\*(.*?)\*\*", r"<b>\1</b>", html_body)
+        html_body = re.sub(r"`(.*?)`", r"<code>\1</code>", html_body)
+        html_body = html_body.replace("\n", "<br>")
+        html += html_body + "</body></html>"
+        return HTMLResponse(content=html)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@router.get("/report/{analysis_id}/pdf", summary="Download PDF report")
+def get_report_pdf(analysis_id: str, db: Session = Depends(get_db)):
+    from fastapi.responses import FileResponse
+    from pathlib import Path
+    import tempfile
+    from app.services.reports.pdf_report import generate_pdf_report
+
+    analysis = repo.get_analysis(db, analysis_id)
+    if not analysis:
+        raise HTTPException(status_code=404, detail=f"Analysis not found: {analysis_id}")
+    try:
+        pkg = _evidence_service.build_evidence_package(analysis_id, db)
+        tmp = Path(tempfile.gettempdir()) / f"aimd_report_{analysis_id}.pdf"
+        generate_pdf_report(pkg, tmp)
+        return FileResponse(
+            str(tmp),
+            media_type="application/pdf",
+            filename=f"AIMD_Report_{analysis_id[:8]}.pdf",
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"PDF generation error: {exc}")
+
+
+@router.get("/evidence/{analysis_id}", summary="Alias for evidence package")
+def get_evidence_alias(analysis_id: str, db: Session = Depends(get_db)):
+    analysis = repo.get_analysis(db, analysis_id)
+    if not analysis:
+        raise HTTPException(status_code=404, detail=f"Analysis not found: {analysis_id}")
+    return _evidence_service.build_evidence_package(analysis_id, db)

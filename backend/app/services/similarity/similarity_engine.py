@@ -98,7 +98,7 @@ class SimilarityEngine:
     """
 
     # Thresholds for declaring a match
-    PHASH_MATCH_THRESHOLD = 0.85   # 85% similarity → perceptual match
+    PHASH_MATCH_THRESHOLD = 0.85   # 85% similarity -> perceptual match
     DHASH_MATCH_THRESHOLD = 0.85
     EMBEDDING_MATCH_THRESHOLD = 0.80
 

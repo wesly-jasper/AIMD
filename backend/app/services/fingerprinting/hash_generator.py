@@ -1,5 +1,5 @@
 """
-Hash generator — cryptographic and perceptual hashes.
+Hash generator -- cryptographic and perceptual hashes.
 
 Uses the imagehash library for pHash and dHash so the values are
 compatible with standard perceptual hash libraries and can be compared
@@ -27,7 +27,7 @@ try:
 except ImportError:
     _IMAGEHASH_AVAILABLE = False
     logger.warning(
-        "imagehash not available — perceptual hashing will fall back to custom DCT implementation"
+        "imagehash not available -- perceptual hashing will fall back to custom DCT implementation"
     )
 
 

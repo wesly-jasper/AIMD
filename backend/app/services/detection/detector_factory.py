@@ -9,9 +9,10 @@ from app.services.detection.detectors.face_detector import BaselineFaceDetector
 from app.services.detection.detectors.object_detector import BaselineObjectDetector
 from app.services.detection.detectors.audio_detector import BaselineAudioAnalyzer
 from app.services.detection.detectors.video_detector import BaselineVideoDetector
-
-
 from app.services.detection.detectors.image.forensic_image_detector import ForensicImageDetector
+from app.services.detection.detectors.image.copy_move_detector import CopyMoveDetector
+from app.services.detection.detectors.image.manipulation_mask_generator import ManipulationMaskGenerator
+from app.services.detection.detectors.image.face_region_analyzer import FaceRegionAnalyzer
 
 class DetectorFactory:
 
@@ -55,3 +56,15 @@ class DetectorFactory:
     @staticmethod
     def create_video_detector():
         return BaselineVideoDetector()
+
+    @staticmethod
+    def create_copy_move_detector():
+        return CopyMoveDetector(detector_type="SIFT")
+
+    @staticmethod
+    def create_manipulation_mask_generator():
+        return ManipulationMaskGenerator()
+
+    @staticmethod
+    def create_face_region_analyzer():
+        return FaceRegionAnalyzer()

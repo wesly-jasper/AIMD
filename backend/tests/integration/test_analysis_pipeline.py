@@ -2,7 +2,7 @@
 End-to-end integration tests for the full AIMD forensic analysis pipeline.
 
 Tests the complete flow:
-  Upload Media → Trigger Analysis Pipeline → Verify All Downstream Artifacts
+  Upload Media -> Trigger Analysis Pipeline -> Verify All Downstream Artifacts
   (Metadata, Frames, Detection, Fingerprints, Similarity, Source, Provenance, Evidence, Report).
 """
 import cv2

@@ -1,5 +1,5 @@
 """
-Detection container — wires detector factory into detection engines.
+Detection container -- wires detector factory into detection engines.
 
 The container exposes a .router property for use by the pipeline.
 """
@@ -16,9 +16,20 @@ def create_detection_router() -> MediaDetectionRouter:
     forensic_image_detector = DetectorFactory.create_forensic_image_detector()
     face_detector = DetectorFactory.create_face_detector()
     object_detector = DetectorFactory.create_object_detector()
+    copy_move_detector = DetectorFactory.create_copy_move_detector()
+    manipulation_mask_generator = DetectorFactory.create_manipulation_mask_generator()
+    face_region_analyzer = DetectorFactory.create_face_region_analyzer()
 
     image_detectors = [
-        d for d in [trufor_detector, forensic_image_detector, face_detector, object_detector]
+        d for d in [
+            trufor_detector,
+            forensic_image_detector,
+            face_detector,
+            object_detector,
+            copy_move_detector,
+            manipulation_mask_generator,
+            face_region_analyzer,
+        ]
         if d is not None
     ]
 

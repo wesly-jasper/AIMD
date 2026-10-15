@@ -3,7 +3,7 @@ SQLAlchemy database engine and session management.
 
 Supports SQLite (local dev/testing) and PostgreSQL (production)
 via DATABASE_URL environment variable. Application code is
-agnostic to the backend — only the URL changes.
+agnostic to the backend -- only the URL changes.
 """
 from sqlalchemy import create_engine, event
 from sqlalchemy.orm import sessionmaker, DeclarativeBase
@@ -62,7 +62,7 @@ def init_db():
     # We do NOT re-import them here to avoid double-registration on the Base metadata.
     # If the app starts without repository being imported first, import models now.
     try:
-        from app.db import models  # noqa: F401 — registers tables with Base
+        from app.db import models  # noqa: F401 -- registers tables with Base
     except ImportError:
         pass
     Base.metadata.create_all(bind=engine)

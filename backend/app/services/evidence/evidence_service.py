@@ -1,20 +1,20 @@
 """
-Evidence Service — aggregates real pipeline outputs into forensic evidence packages.
+Evidence Service -- aggregates real pipeline outputs into forensic evidence packages.
 
 CRITICAL REQUIREMENT: This service must NEVER use hardcoded or mock values.
 All evidence must be traceable to real pipeline computations.
 
 Evidence categories:
-  FACT:        Directly measured or computed — cryptographic hashes, file sizes,
+  FACT:        Directly measured or computed -- cryptographic hashes, file sizes,
                EXIF values, pixel dimensions. These can be independently verified.
-  OBSERVATION: Forensic signals detected by algorithms — ELA anomalies, spectral
+  OBSERVATION: Forensic signals detected by algorithms -- ELA anomalies, spectral
                discontinuities, face boundary irregularities. Real but not definitive.
   INFERENCE:   Conclusions drawn from combining multiple observations. Must clearly
                state the combination of signals and confidence level.
   UNCERTAINTY: Limitations, missing models, low-confidence conditions. Must not
                be suppressed.
 
-Evidence is pulled from the database — not recomputed here.
+Evidence is pulled from the database -- not recomputed here.
 """
 import logging
 from datetime import datetime, timezone
@@ -37,7 +37,7 @@ class EvidenceService:
         """
         Build a complete forensic evidence package from pipeline results stored in DB.
 
-        All values come from the database — previously computed by the pipeline.
+        All values come from the database -- previously computed by the pipeline.
         No values are fabricated here.
         """
         analysis = repo.get_analysis(db, analysis_id)
@@ -99,9 +99,9 @@ class EvidenceService:
                     "scope": fp.scope,
                     "evidence_category": "FACT" if fp.algorithm == "sha256" else "OBSERVATION",
                     "note": (
-                        "Cryptographic hash — exact file identity"
+                        "Cryptographic hash -- exact file identity"
                         if fp.algorithm == "sha256"
-                        else "Perceptual hash — visual similarity (not cryptographic)"
+                        else "Perceptual hash -- visual similarity (not cryptographic)"
                     ),
                 }
 
@@ -171,7 +171,7 @@ class EvidenceService:
             "evidence_category": "INFERENCE",
             "note": (
                 "INFERENCE: 'Earliest-known occurrence' means the earliest timestamp "
-                "AIMD discovered — not the absolute origin. Offline and unindexed "
+                "AIMD discovered -- not the absolute origin. Offline and unindexed "
                 "sources cannot be searched."
             ),
         }
@@ -284,6 +284,6 @@ class EvidenceService:
         Use build_evidence_package(analysis_id, db) instead.
         """
         raise NotImplementedError(
-            "Use EvidenceService.build_evidence_package(analysis_id, db) — "
+            "Use EvidenceService.build_evidence_package(analysis_id, db) -- "
             "evidence requires a database session to retrieve real pipeline results."
         )

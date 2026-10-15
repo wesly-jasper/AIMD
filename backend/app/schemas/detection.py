@@ -2,10 +2,10 @@
 Detection schemas.
 
 Assessment values (use these instead of bare true/false):
-  CLEAN         — analysis complete, no anomalies above threshold
-  SUSPICIOUS    — significant forensic signals detected
-  INCONCLUSIVE  — analysis ran but cannot make a determination
-  UNAVAILABLE   — detector/model not configured or applicable
+  CLEAN         -- analysis complete, no anomalies above threshold
+  SUSPICIOUS    -- significant forensic signals detected
+  INCONCLUSIVE  -- analysis ran but cannot make a determination
+  UNAVAILABLE   -- detector/model not configured or applicable
 """
 from __future__ import annotations
 

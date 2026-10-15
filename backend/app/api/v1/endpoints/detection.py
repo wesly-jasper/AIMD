@@ -1,5 +1,5 @@
 """
-/api/v1/detection — Direct detection endpoint.
+/api/v1/detection -- Direct detection endpoint.
 
 Provides raw access to the detection engine without running the full pipeline.
 For full forensic analysis, use POST /api/v1/analysis instead.

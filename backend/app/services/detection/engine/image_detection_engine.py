@@ -1,13 +1,13 @@
 """
-Image Detection Engine — aggregates results from multiple image detectors.
+Image Detection Engine -- aggregates results from multiple image detectors.
 
 Aggregation logic:
   - Runs all configured detectors.
   - Computes weighted composite confidence.
   - Determines overall assessment based on:
-      * Any SUSPICIOUS detector result → overall SUSPICIOUS
-      * All INCONCLUSIVE → overall INCONCLUSIVE
-      * No manipulation signals → CLEAN
+      * Any SUSPICIOUS detector result -> overall SUSPICIOUS
+      * All INCONCLUSIVE -> overall INCONCLUSIVE
+      * No manipulation signals -> CLEAN
   - Records which detector drove the result (dominant_signal).
   - Collects all localization regions.
 
@@ -23,10 +23,13 @@ logger = logging.getLogger(__name__)
 
 # Detector weights for composite confidence scoring
 _DETECTOR_WEIGHTS: dict[str, float] = {
-    "ForensicImageDetector": 0.60,   # ELA + FFT + noise — most reliable baseline
-    "BaselineFaceDetector": 0.25,
-    "BaselineObjectDetector": 0.00,  # UNAVAILABLE — excluded from scoring
-    "TruForDetector": 0.80,          # Model-based — high weight if enabled
+    "ForensicImageDetector": 0.50,   # ELA + FFT + noise -- most reliable baseline
+    "BaselineFaceDetector": 0.20,
+    "BaselineObjectDetector": 0.00,  # UNAVAILABLE -- excluded from scoring
+    "TruForDetector": 0.70,          # Model-based -- high weight if enabled
+    "CopyMoveDetector": 0.45,        # Copy-move forgery detection
+    "ManipulationMaskGenerator": 0.55,  # Pixel-level manipulation heatmap
+    "FaceRegionAnalyzer": 0.50,      # Per-facial-region deepfake analysis
 }
 _DEFAULT_WEIGHT = 0.30
 

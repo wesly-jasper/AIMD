@@ -1,5 +1,5 @@
 """
-Media Ingestion Service — validates, stores, and persists media to the database.
+Media Ingestion Service -- validates, stores, and persists media to the database.
 
 Security:
   - Sanitizes filenames to prevent path traversal.
@@ -33,8 +33,8 @@ _MAGIC_SIGNATURES: dict[str, bytes] = {
     "image/jpeg": bytes([0xFF, 0xD8, 0xFF]),
     "image/png": bytes([0x89, 0x50, 0x4E, 0x47]),
     "image/gif": b"GIF",
-    "image/webp": None,  # RIFF....WEBP — checked separately
-    "video/mp4": None,   # ftyp at offset 4 — checked separately
+    "image/webp": None,  # RIFF....WEBP -- checked separately
+    "video/mp4": None,   # ftyp at offset 4 -- checked separately
 }
 
 
@@ -60,7 +60,7 @@ def _detect_media_type(data: bytes, content_type: str) -> str:
     if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
         return "image"
     if data[:4] in (b"\x00\x00\x00\x18", b"\x00\x00\x00\x1c", b"\x00\x00\x00\x20"):
-        # MP4 ftyp box — likely video
+        # MP4 ftyp box -- likely video
         if data[4:8] == b"ftyp":
             return "video"
     # AVI
@@ -159,7 +159,7 @@ class MediaIngestionService:
         sha256 = self.generate_sha256(data)
 
         logger.info(
-            "Ingested %s → %s (%d bytes, sha256=%s…)",
+            "Ingested %s -> %s (%d bytes, sha256=%s)",
             safe_name, stored_filename, len(data), sha256[:16]
         )
 

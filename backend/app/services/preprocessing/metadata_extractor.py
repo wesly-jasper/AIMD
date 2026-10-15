@@ -1,5 +1,5 @@
 """
-Metadata extractor — extracts and classifies technical metadata.
+Metadata extractor -- extracts and classifies technical metadata.
 
 Evidence categories:
   FACT:        Values read directly from file headers/EXIF/container.
@@ -92,7 +92,7 @@ class MetadataExtractor:
                         exif[tag_name] = value
 
         except Exception as exc:
-            logger.debug("EXIF extraction failed for %s: %s", file_path, exc)
+            pass
 
         return exif
 
@@ -166,7 +166,7 @@ class MetadataExtractor:
             meta["subtype"] = info.subtype            # FACT
             meta["source"] = "FACT"
         except Exception as exc:
-            logger.debug("soundfile audio metadata failed for %s: %s", file_path, exc)
+            pass
             # Try librosa as fallback
             try:
                 import librosa

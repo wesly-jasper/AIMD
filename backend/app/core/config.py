@@ -66,6 +66,31 @@ class Settings(BaseSettings):
     # ── Optional ML models ────────────────────────────────────────────────────
     trufor_enabled: bool = False
     trufor_model_path: Optional[Path] = None
+    ai_image_model_path: Optional[Path] = None
+    deepfake_model_path: Optional[Path] = None
+    audio_model_path: Optional[Path] = None
+    device: str = "auto"  # auto | cpu | cuda
+
+    # ── Advanced Localization Detectors ─────────────────────────────────────
+    copymove_enabled: bool = True
+    copymove_detector_type: str = "SIFT"  # SIFT | ORB
+    manipulation_mask_enabled: bool = True
+    face_region_analyzer_enabled: bool = True
+    face_region_use_mediapipe: bool = True
+
+    # ── Reports ───────────────────────────────────────────────────────────────
+    report_dir: Path = BASE_DIR / "reports"
+    logs_dir: Path = BASE_DIR / "logs"
+
+    # ── Performance limits ────────────────────────────────────────────────────
+    max_video_duration_seconds: int = 600
+    max_audio_duration_seconds: int = 600
+    max_image_dimension: int = 8000
+    processing_timeout_seconds: int = 600
+
+    # ── Security / App ────────────────────────────────────────────────────────
+    app_env: str = "development"
+    secret_key: str = "aimd_forensic_platform_secret_key_change_in_production"
 
     # ── External search providers ─────────────────────────────────────────────
     google_vision_api_key: Optional[str] = None

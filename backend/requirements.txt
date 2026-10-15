@@ -1,5 +1,8 @@
-# AIMD — AI Media Detection & Digital Forensics Platform
-# Core web framework
+﻿# AIMD - AI Media Detection & Digital Forensics Platform
+# Full dependency manifest for all implementation phases
+# Python 3.11.9 | Windows compatible
+
+# CORE WEB FRAMEWORK
 fastapi>=0.110.0
 uvicorn[standard]>=0.29.0
 pydantic>=2.6.0
@@ -7,29 +10,62 @@ pydantic-settings>=2.2.0
 python-multipart>=0.0.9
 aiofiles>=23.2.1
 
-# Database
+# DATABASE
 sqlalchemy>=2.0.0
 alembic>=1.13.0
 
-# Image processing & computer vision
+# IMAGE PROCESSING & COMPUTER VISION
 opencv-python-headless>=4.9.0,<5.0.0
 pillow>=10.2.0
 numpy>=1.26.0
 imagehash>=4.3.1
 
-# EXIF metadata
+# EXIF METADATA
 piexif>=1.1.3
 
-# Audio analysis
+# AUDIO ANALYSIS
 librosa>=0.10.0
 soundfile>=0.12.1
 
-# HTTP client (integration tests)
-httpx>=0.27.0
+# DEEP LEARNING RUNTIME (Phase 1-5)
+torch>=2.0.0
+torchvision>=0.15.0
+onnxruntime>=1.17.0
 
-# Testing
+# PHASE 2: SEMANTIC IMAGE EMBEDDINGS (OpenCLIP)
+open-clip-torch>=2.24.0
+
+# PHASE 3: ADVANCED FACE DETECTION (MTCNN)
+facenet-pytorch>=2.5.3
+
+# PHASE 4: SYNTHETIC SPEECH DETECTION (Wav2Vec2)
+transformers>=4.36.0
+
+# PHASE 5: OBJECT DETECTION (YOLOv8)
+ultralytics>=8.1.0
+
+# PHASE 6: EXTERNAL SOURCE DISCOVERY
+google-cloud-vision>=3.7.0
+
+# PHASE 9: AUTHENTICATION (JWT)
+python-jose[cryptography]>=3.3.0
+passlib[bcrypt]>=1.7.4
+bcrypt>=4.0.0
+
+# PHASE 10: SECURITY HARDENING
+slowapi>=0.1.9
+
+# HTTP CLIENT
+httpx>=0.27.0
+requests>=2.31.0
+
+# TESTING
 pytest>=8.1.0
 pytest-asyncio>=0.23.0
 
-# Utilities
+# REPORTING
+reportlab>=4.0.0
+matplotlib>=3.8.0
+
+# UTILITIES
 python-dotenv>=1.0.0

@@ -1,9 +1,9 @@
 """
-/api/v1/analysis — Unified analysis pipeline endpoint.
+/api/v1/analysis -- Unified analysis pipeline endpoint.
 
-POST /api/v1/analysis  — Run the complete forensic pipeline on a media_id.
-GET  /api/v1/analysis/{analysis_id}  — Retrieve analysis status and results.
-GET  /api/v1/analysis/  — List analyses.
+POST /api/v1/analysis  -- Run the complete forensic pipeline on a media_id.
+GET  /api/v1/analysis/{analysis_id}  -- Retrieve analysis status and results.
+GET  /api/v1/analysis/  -- List analyses.
 """
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
@@ -30,8 +30,8 @@ def run_analysis(
     """
     Run the complete AIMD forensic analysis pipeline on an uploaded media file.
 
-    Stages: metadata → frames → detection → fingerprinting → similarity
-            → source tracing → provenance → evidence → report
+    Stages: metadata -> frames -> detection -> fingerprinting -> similarity
+            -> source tracing -> provenance -> evidence -> report
 
     All results are persisted to the database and associated with the returned
     analysis_id.
@@ -78,21 +78,46 @@ def get_analysis(
 
     detections = repo.get_detections_for_analysis(db, analysis_id)
 
+    media = repo.get_media(db, analysis.media_id)
+    media_type = media.media_type if media else (detections[0].media_type if detections else "image")
+
+    # Find suspicious segments from video detections
+    suspicious_segments = []
+    for d in detections:
+        if d.suspicious_segments:
+            suspicious_segments = d.suspicious_segments
+            break
+
     return {
         "analysis_id": analysis.id,
+        "id": analysis.id,
         "media_id": analysis.media_id,
+        "media_type": media_type,
         "status": analysis.status,
         "assessment": analysis.assessment,
         "overall_confidence": analysis.overall_confidence,
+        "suspicious_segments": suspicious_segments,
         "created_at": analysis.created_at.isoformat() if analysis.created_at else None,
         "completed_at": analysis.completed_at.isoformat() if analysis.completed_at else None,
         "error_message": analysis.error_message,
         "detections": [
             {
                 "detector": d.detector,
+                "media_type": d.media_type,
                 "manipulation_type": d.manipulation_type,
                 "assessment": d.assessment,
                 "confidence": d.confidence,
+                "regions": [
+                    {
+                        "type": r.region_type,
+                        "confidence": r.confidence,
+                        "bbox": r.bbox,
+                        "start_timestamp": r.start_timestamp,
+                        "end_timestamp": r.end_timestamp,
+                    }
+                    for r in d.regions
+                ],
+                "metadata": d.detector_metadata or {},
             }
             for d in detections
         ],
@@ -109,10 +134,12 @@ def list_analyses(
     return {
         "items": [
             {
+                "id": a.id,
                 "analysis_id": a.id,
                 "media_id": a.media_id,
                 "status": a.status,
                 "assessment": a.assessment,
+                "overall_confidence": a.overall_confidence,
                 "created_at": a.created_at.isoformat() if a.created_at else None,
             }
             for a in items

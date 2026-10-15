@@ -1,5 +1,5 @@
 """
-Keyframe selector — selects visually representative frames from extracted frames.
+Keyframe selector -- selects visually representative frames from extracted frames.
 
 Uses frame-difference scoring (scene change detection) to select diverse
 keyframes rather than uniform interval sampling.

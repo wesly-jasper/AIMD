@@ -1,20 +1,20 @@
 """
-Analysis Pipeline — central orchestrator for the AIMD forensic pipeline.
+Analysis Pipeline -- central orchestrator for the AIMD forensic pipeline.
 
 Connects all pipeline stages under a common analysis_id:
 
-  ingest → metadata → preprocess → frames → keyframes →
-  detection → localization → fingerprint → similarity →
-  source tracing → provenance → evidence → report → persist
+  ingest -> metadata -> preprocess -> frames -> keyframes ->
+  detection -> localization -> fingerprint -> similarity ->
+  source tracing -> provenance -> evidence -> report -> persist
 
 Design principles:
   - All stages use the same analysis_id.
   - Failures in non-critical stages mark analysis as PARTIAL, not FAILED.
-  - No stage fabricates data — all outputs must come from real computation.
+  - No stage fabricates data -- all outputs must come from real computation.
   - The pipeline is synchronous (Phase 1). Designed for async swap-in:
-      API → AnalysisPipeline.run() → persist
+      API -> AnalysisPipeline.run() -> persist
     Can become:
-      API → queue job → Worker → AnalysisPipeline.run() → persist
+      API -> queue job -> Worker -> AnalysisPipeline.run() -> persist
     without changing the pipeline itself.
 """
 import logging
@@ -148,7 +148,7 @@ class AnalysisPipeline:
             )
 
             logger.info(
-                "[%s] Pipeline complete — status=%s assessment=%s confidence=%.3f",
+                "[%s] Pipeline complete -- status=%s assessment=%s confidence=%.3f",
                 analysis_id, final_status, assessment, confidence or 0.0
             )
 
@@ -227,7 +227,7 @@ class AnalysisPipeline:
             keyframes = kf_result.get("keyframes", [])
             # Mark keyframes in DB
             for kf in keyframes:
-                # Update the frame record — find it by frame_index
+                # Update the frame record -- find it by frame_index
                 frame_recs = repo.get_frames_for_media(db, media_id)
                 for fr in frame_recs:
                     if fr.frame_index == kf["frame_index"]:

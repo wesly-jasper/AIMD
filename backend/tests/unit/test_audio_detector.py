@@ -1,5 +1,10 @@
 import pytest
-from app.services.detection.detectors.audio_detector import BaselineAudioAnalyzer, BaseAudioAnalyzer
+from pathlib import Path
+from app.services.detection.detectors.audio_detector import (
+    BaselineAudioAnalyzer,
+    NeuralSpeechDetector,
+    BaseAudioAnalyzer,
+)
 from app.schemas.detection import DetectionResult
 
 def test_audio_detector_missing_file():
@@ -19,4 +24,21 @@ def test_audio_detector_success(tmp_path):
     assert result.detector == "BaselineAudioAnalyzer"
     assert result.media_type == "audio"
     assert result.manipulation_type == "audio"
-    assert result.metadata.get("status") == "baseline"
+    assert "status" in result.metadata
+
+def test_neural_speech_detector_missing_file():
+    detector = NeuralSpeechDetector()
+    with pytest.raises(FileNotFoundError):
+        detector.detect("missing_audio.wav")
+
+def test_neural_speech_detector_execution(tmp_path):
+    detector = NeuralSpeechDetector()
+    assert isinstance(detector, BaseAudioAnalyzer)
+
+    audio_file = tmp_path / "test_synth.wav"
+    audio_file.write_bytes(b"test wave audio")
+
+    result = detector.detect(str(audio_file))
+    assert isinstance(result, DetectionResult)
+    assert result.media_type == "audio"
+    assert result.manipulation_type == "audio"

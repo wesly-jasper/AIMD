@@ -1,24 +1,26 @@
 """
-Video Detection Engine — real temporal forensic analysis.
+Video Detection Engine -- real temporal forensic analysis with spatial-temporal tracking.
 
 Implements frame-level analysis:
   1. Samples frames at configurable FPS.
   2. Runs ForensicImageDetector on each sampled frame.
   3. Runs BaselineFaceDetector for temporal face consistency.
   4. Computes frame-to-frame optical flow to detect motion discontinuities.
-  5. Aggregates frame scores into suspicious segments.
-  6. Returns structured result with temporal localization.
+  5. Tracks suspicious regions across frames using spatial-temporal tracker.
+  6. Aggregates frame scores into suspicious segments.
+  7. Returns structured result with temporal AND spatial localization.
 
 Assessment values:
-  SUSPICIOUS    — significant temporal anomaly evidence found
-  CLEAN         — no anomalies above threshold
-  INCONCLUSIVE  — insufficient frames or analysis failed
+  SUSPICIOUS    -- significant temporal anomaly evidence found
+  CLEAN         -- no anomalies above threshold
+  INCONCLUSIVE  -- insufficient frames or analysis failed
 
 Video confidence is NOT simply the mean of random scores.
 It is derived from:
   - Proportion of frames with elevated anomaly scores
   - Peak anomaly score
   - Temporal clustering of anomalies (contiguous anomalous segments)
+  - Spatial-temporal consistency of tracked regions
 """
 import logging
 from pathlib import Path
@@ -30,6 +32,7 @@ import numpy as np
 from app.schemas.detection import DetectionResult, DetectionRegion
 from app.services.detection.detectors.image.forensic_image_detector import ForensicImageDetector
 from app.services.detection.detectors.face_detector import BaselineFaceDetector
+from app.services.detection.engine.video_spatial_tracker import VideoSpatialTemporalTracker, TemporalAnomalyDetector
 
 logger = logging.getLogger(__name__)
 
@@ -48,7 +51,12 @@ class VideoDetectionEngine:
     def __init__(self, detectors=None):
         self._image_detector = ForensicImageDetector()
         self._face_detector = BaselineFaceDetector()
+        self._spatial_tracker = VideoSpatialTemporalTracker()
+        self._temporal_anomaly_detector = TemporalAnomalyDetector()
         self.detectors = detectors or [self._image_detector, self._face_detector]
+        # Failure counters for UNCERTAINTY evidence
+        self._image_detector_failures = 0
+        self._face_detector_failures = 0
 
     def detect(self, file_path: Path | str) -> dict[str, Any]:
         file_path = Path(file_path)
@@ -82,7 +90,7 @@ class VideoDetectionEngine:
             step = max(1, total_frames // frames_to_analyse)
 
         logger.info(
-            "Video analysis: %s — %d total frames, step=%d, analysing ~%d frames",
+            "Video analysis: %s -- %d total frames, step=%d, analysing ~%d frames",
             file_path.name, total_frames, step, frames_to_analyse,
         )
 
@@ -115,6 +123,9 @@ class VideoDetectionEngine:
         frame_index = 0
         analysed = 0
 
+        # Reset spatial tracker for new video
+        self._spatial_tracker.reset()
+
         try:
             with tempfile.TemporaryDirectory() as tmpdir:
                 while analysed < MAX_ANALYSIS_FRAMES:
@@ -146,7 +157,8 @@ class VideoDetectionEngine:
                             image_assessment = "SUSPICIOUS" if img_result.manipulation_detected else "CLEAN"
                             regions = img_result.regions
                         except Exception as exc:
-                            logger.debug("ForensicImageDetector failed on frame %d: %s", frame_index, exc)
+                            logger.warning("ForensicImageDetector failed on frame %d: %s", frame_index, exc, exc_info=True)
+                            self._image_detector_failures += 1
 
                         # ── Face forensics ────────────────────────────────────
                         face_score = 0.0
@@ -156,7 +168,8 @@ class VideoDetectionEngine:
                             face_score = float(face_result.confidence)
                             face_regions = face_result.regions
                         except Exception as exc:
-                            logger.debug("FaceDetector failed on frame %d: %s", frame_index, exc)
+                            logger.warning("FaceDetector failed on frame %d: %s", frame_index, exc, exc_info=True)
+                            self._face_detector_failures += 1
 
                         # Combined frame anomaly score
                         # Weighted: image forensics 50%, optical flow 30%, face 20%
@@ -167,9 +180,16 @@ class VideoDetectionEngine:
                         )
                         combined_score = round(float(np.clip(combined_score, 0.0, 1.0)), 4)
 
+                        # Track regions spatially across frames
+                        all_frame_regions = regions + face_regions
+                        tracked_regions = self._spatial_tracker.process_frame(
+                            frame, all_frame_regions, analysed  # Use analysed count as frame index for tracking
+                        )
+
                         results.append({
                             "frame_index": frame_index,
                             "timestamp_seconds": timestamp,
+                            "analysed_index": analysed,
                             "image_forensic_score": round(image_confidence, 4),
                             "flow_discontinuity_score": round(flow_score, 4),
                             "face_anomaly_score": round(face_score, 4),
@@ -177,6 +197,7 @@ class VideoDetectionEngine:
                             "assessment": image_assessment,
                             "regions": regions,
                             "face_regions": face_regions,
+                            "tracked_regions": tracked_regions,
                         })
                         analysed += 1
 
@@ -227,6 +248,7 @@ class VideoDetectionEngine:
         """
         Aggregate frame-level results into a video-level detection result.
         Identifies suspicious segments (contiguous anomalous frames).
+        Includes spatial-temporal tracking results.
         """
         scores = [r["combined_score"] for r in frame_results]
         suspicious_frames = [r for r in frame_results if r["combined_score"] >= FRAME_ANOMALY_THRESHOLD]
@@ -234,12 +256,37 @@ class VideoDetectionEngine:
         peak_score = max(scores)
         mean_score = float(np.mean(scores))
 
-        # Video confidence: weighted combination of proportion and peak
-        video_confidence = round(
-            float(np.clip(proportion * 0.6 + peak_score * 0.4, 0.0, 1.0)), 4
+        # Get all tracked regions from all frames
+        all_tracked_regions = []
+        for r in frame_results:
+            all_tracked_regions.extend(r.get("tracked_regions", []))
+
+        # Analyze temporal anomalies in tracked regions
+        temporal_anomalies = self._temporal_anomaly_detector.analyze_tracks(
+            self._spatial_tracker.tracked_regions
         )
 
-        if proportion >= SUSPICIOUS_PROPORTION_THRESHOLD:
+        # Boost confidence if we have consistent tracked regions
+        tracked_confidence_boost = 0.0
+        if all_tracked_regions:
+            avg_temporal_consistency = np.mean([r.temporal_consistency for r in all_tracked_regions])
+            tracked_confidence_boost = min(0.15, avg_temporal_consistency * 0.2)
+
+        # Video confidence: weighted combination of proportion, peak, and tracking
+        video_confidence = round(
+            float(np.clip(proportion * 0.5 + peak_score * 0.3 + tracked_confidence_boost, 0.0, 1.0)), 4
+        )
+
+        # Calculate failure rates
+        frames_analysed = len(frame_results)
+        image_failure_rate = self._image_detector_failures / max(frames_analysed, 1)
+        face_failure_rate = self._face_detector_failures / max(frames_analysed, 1)
+        total_failure_rate = (self._image_detector_failures + self._face_detector_failures) / max(frames_analysed * 2, 1)
+
+        # If too many detector failures, mark as UNCERTAINTY
+        if total_failure_rate > 0.5:  # More than 50% failure rate across both detectors
+            assessment = "INCONCLUSIVE"
+        elif proportion >= SUSPICIOUS_PROPORTION_THRESHOLD:
             assessment = "SUSPICIOUS"
         elif video_confidence < 0.20:
             assessment = "CLEAN"
@@ -249,12 +296,24 @@ class VideoDetectionEngine:
         # ── Identify suspicious segments ──────────────────────────────────────
         segments = self._identify_segments(frame_results)
 
-        # ── Build DetectionResult ─────────────────────────────────────────────
-        # Collect top suspicious regions from flagged frames (up to 10)
+        # ── Build tracked regions for final result ────────────────────────────
+        # Get tracked regions from last analyzed frame
+        last_frame_idx = len(frame_results) - 1 if frame_results else 0
+        final_tracked_regions = self._spatial_tracker.get_tracked_regions_for_frame(last_frame_idx)
+
+        # Collect top suspicious regions from flagged frames + tracked regions
         top_regions: list[DetectionRegion] = []
         for r in sorted(suspicious_frames, key=lambda x: x["combined_score"], reverse=True)[:5]:
             for reg in r["regions"][:2]:
                 top_regions.append(reg)
+
+        # Add top tracked regions
+        for tr in sorted(final_tracked_regions, key=lambda x: x.confidence, reverse=True)[:5]:
+            top_regions.append(tr)
+
+        # Create failure info strings for UNCERTAINTY evidence
+        image_failure_msg = f"image detector failed on {self._image_detector_failures} of {len(frame_results)} frames" if self._image_detector_failures > 0 else None
+        face_failure_msg = f"face detector failed on {self._face_detector_failures} of {len(frame_results)} frames" if self._face_detector_failures > 0 else None
 
         result = DetectionResult(
             detector="VideoTemporalAnalysisEngine",
@@ -262,10 +321,10 @@ class VideoDetectionEngine:
             manipulation_detected=assessment == "SUSPICIOUS",
             confidence=video_confidence,
             manipulation_type="temporal",
-            regions=top_regions[:10],
+            regions=top_regions[:15],
             metadata={
                 "status": "active_temporal_analysis",
-                "detector_version": "1.0",
+                "detector_version": "1.1",
                 "assessment": assessment,
                 "frames_analysed": len(frame_results),
                 "total_video_frames": total_frames,
@@ -274,6 +333,9 @@ class VideoDetectionEngine:
                 "peak_frame_score": round(peak_score, 4),
                 "mean_frame_score": round(mean_score, 4),
                 "video_confidence": video_confidence,
+                "tracked_confidence_boost": round(tracked_confidence_boost, 4),
+                "tracked_regions_count": len(all_tracked_regions),
+                "temporal_anomalies": temporal_anomalies,
                 "frame_scores": [
                     {
                         "frame_index": r["frame_index"],
@@ -283,10 +345,17 @@ class VideoDetectionEngine:
                     for r in frame_results
                 ],
                 "suspicious_segments": segments,
+                "detector_failures": {
+                    "image_detector_failures": self._image_detector_failures,
+                    "face_detector_failures": self._face_detector_failures,
+                    "total_frames_analyzed": len(frame_results)
+                },
+                "failure_messages": [msg for msg in [image_failure_msg, face_failure_msg] if msg is not None],
                 "note": (
                     "OBSERVATION: Temporal anomaly scores derived from ELA, FFT, "
                     "noise residual, optical flow discontinuity, and face boundary analysis. "
-                    "These are forensic signals — not proof of manipulation."
+                    "Spatial-temporal tracking applied for region consistency across frames. "
+                    "These are forensic signals -- not proof of manipulation."
                 ),
             },
         )
@@ -295,6 +364,7 @@ class VideoDetectionEngine:
             "media_type": "video",
             "detections": [result],
             "suspicious_segments": segments,
+            "temporal_anomalies": temporal_anomalies,
             "frame_level_scores": [
                 {
                     "frame_index": r["frame_index"],

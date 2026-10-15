@@ -1,5 +1,5 @@
 """
-Repository layer — all database CRUD operations.
+Repository layer -- all database CRUD operations.
 Endpoints call services; services call repositories.
 No business logic lives here.
 """

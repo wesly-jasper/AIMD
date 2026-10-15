@@ -1,5 +1,5 @@
 """
-Frame extractor — extracts frames from video files with timestamp mapping.
+Frame extractor -- extracts frames from video files with timestamp mapping.
 
 Every extracted frame records:
   - media_id: the source media
@@ -42,7 +42,7 @@ class FrameExtractor:
             media_id: ID of the source media (used for directory naming).
             frame_interval: Save every Nth original frame. Ignored if target_fps set.
             target_fps: If set, sample at this many frames per second.
-                        E.g. target_fps=1.0 → one frame per second.
+                        E.g. target_fps=1.0 -> one frame per second.
 
         Returns:
             dict with:

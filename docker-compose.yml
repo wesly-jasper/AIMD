@@ -1,0 +1,31 @@
+services:
+  aimd-backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: aimd_platform
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      - DATABASE_URL=sqlite:////app/backend/aimd.db
+      - LOG_LEVEL=INFO
+      - APP_ENV=production
+      - DEVICE=cpu
+    volumes:
+      - aimd_uploads:/app/backend/uploads
+      - aimd_processed:/app/backend/processed
+      - aimd_reports:/app/backend/reports
+      - aimd_db:/app/backend
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/v1/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+volumes:
+  aimd_uploads:
+  aimd_processed:
+  aimd_reports:
+  aimd_db:

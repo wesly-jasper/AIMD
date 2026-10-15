@@ -52,10 +52,14 @@ htmlcov/
 
 # ── Database & SQLite ─────────────────────
 *.db
+*.db-shm
+*.db-wal
 *.sqlite
 *.sqlite3
 aimd.db
 backend/aimd.db
+backend/aimd.db-shm
+backend/aimd.db-wal
 
 # ── Media Ingestion & Processed Storage ────
 uploads/
@@ -69,6 +73,17 @@ backend/keyframes/
 storage/
 backend/storage/
 
+# ── ML Model Weights (do not commit) ─────
+*.pt
+*.pth
+*.onnx
+*.bin
+*.ckpt
+backend/yolov8n.pt
+backend/models/
+models/
+weights/
+
 # ── Test Artifacts & Temporary Files ──────
 *.log
 scratch/
@@ -81,6 +96,8 @@ test_sample.*
 backend/test.jpg
 backend/test.png
 backend/test.mp4
+reports/
+backend/reports/
 
 # ── Node & Frontend ───────────────────────
 node_modules/

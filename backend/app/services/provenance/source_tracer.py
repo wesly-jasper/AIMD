@@ -1,5 +1,5 @@
 """
-Source Tracer — identifies the earliest-known occurrence of a media file.
+Source Tracer -- identifies the earliest-known occurrence of a media file.
 
 Works by:
   1. Running local similarity search (via SimilarityEngine) to find matching
@@ -8,7 +8,7 @@ Works by:
   3. Sorting candidates by source timestamp to identify the earliest occurrence.
 
 Important language:
-  - "Earliest-known occurrence discovered by AIMD" — not "original source".
+  - "Earliest-known occurrence discovered by AIMD" -- not "original source".
   - AIMD cannot claim absolute origin. Offline and unindexed sources cannot
     be searched.
 
