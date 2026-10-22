@@ -291,7 +291,7 @@ def test_cocoglide_heatmaps_overlap_their_ground_truth():
     """
     pairs = _cocoglide_pairs(limit=8)
     if not pairs:
-        pytest.skip("CocoGlide not installed (scripts/fetch_models.py --cocoglide-zip)")
+        pytest.skip("CocoGlide not installed (scripts/fetch_models.py --cocoglide-parquet)")
 
     runner = TruForRunner(TRUFOR_ROOT)
     runner.load()
@@ -299,7 +299,9 @@ def test_cocoglide_heatmaps_overlap_their_ground_truth():
     for image, mask_file in pairs:
         heatmap = runner.predict(image)["localization_map"]
         with Image.open(mask_file) as m:
-            mask = np.asarray(m.convert("L").resize(heatmap.shape[::-1], Image.NEAREST)) > 127
+            values = np.asarray(m.convert("L").resize(heatmap.shape[::-1], Image.NEAREST))
+        # Copies differ in whether a binary mask is stored as 0/1 or 0/255.
+        mask = values > values.max() / 2
         if mask.all() or not mask.any():
             continue
         inside_higher += heatmap[mask].mean() > heatmap[~mask].mean()

@@ -11,6 +11,7 @@ Usage (from backend/, with the venv python):
     python scripts/fetch_models.py --samples            # also the two demo images
     python scripts/fetch_models.py --weights-zip D:/Downloads/TruFor_weights.zip
     python scripts/fetch_models.py --cocoglide-zip D:/Downloads/CocoGlide.zip
+    python scripts/fetch_models.py --cocoglide-parquet D:/Downloads/glide-00000-of-00001.parquet
 
 The official weights host (www.grip.unina.it) has been unreachable since
 mid-2026 (grip-unina/TruFor issues #34, #35). When the download fails, get
@@ -24,6 +25,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import shutil
 import sys
 import zipfile
@@ -244,6 +246,92 @@ def install_cocoglide(root: Path, archive: Path, source: str, manifest: dict) ->
     print(f"Extracted CocoGlide ({count} files, archive SHA-256 {zip_sha})")
 
 
+# Real images are named after their COCO class ("baseball bat_292330.png"), so
+# inner spaces are allowed; separators, leading dots and other suffixes are not.
+_SAFE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 ._-]*\.(png|jpe?g)$", re.IGNORECASE)
+
+
+def _image_bytes(cell) -> bytes | None:
+    """A Hugging Face ``Image`` cell (``{"bytes", "path"}``) or plain binary."""
+    if cell is None:
+        return None
+    if isinstance(cell, dict):
+        return cell.get("bytes")
+    return bytes(cell)
+
+
+def _image_suffix(data: bytes) -> str:
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return ".png"
+    if data.startswith(b"\xff\xd8\xff"):
+        return ".jpg"
+    raise VerificationError("CocoGlide row holds an image that is neither PNG nor JPEG")
+
+
+def install_cocoglide_parquet(root: Path, parquet: Path, source: str, manifest: dict) -> None:
+    """
+    Unpack the Hugging Face copy of CocoGlide (``nebula/CocoGlide``) into files.
+
+    Layout: ``fake/<name>``, ``real/<name>`` and ``mask/<stem>_mask.png`` for each
+    fake, which is what the overlap test pairs on. Names come from the ``key``
+    column and are accepted only as plain file names; the bytes are written
+    as they are stored, never re-encoded, so the evaluation sees the copy's
+    pixels exactly. Like the zip, this copy has no published hash to check.
+    """
+    try:
+        import pyarrow.parquet as pq
+    except ImportError as exc:
+        raise VerificationError("--cocoglide-parquet needs pyarrow (pip install pyarrow)") from exc
+
+    parquet_sha, parquet_md5 = file_digests(parquet)
+    columns = {"key", "image", "mask", "label"}
+    table = pq.ParquetFile(parquet)
+    missing = columns - set(table.schema_arrow.names)
+    if missing:
+        raise VerificationError(f"not the CocoGlide parquet: missing columns {sorted(missing)}")
+
+    dest = root / release.COCOGLIDE_RELPATH
+    counts = {"fake": 0, "real": 0, "mask": 0}
+    seen: set[str] = set()
+    for batch in table.iter_batches(batch_size=32, columns=sorted(columns)):
+        for row in batch.to_pylist():
+            name = PurePosixPath(str(row["key"]).replace("\\", "/")).name
+            if not _SAFE_NAME.match(name) or name.lower() in seen:
+                raise VerificationError(f"unusable or duplicate CocoGlide key: {row['key']!r}")
+            seen.add(name.lower())
+
+            image = _image_bytes(row["image"])
+            if not image:
+                raise VerificationError(f"CocoGlide row {name} has no image")
+            _image_suffix(image)
+            kind = "fake" if row["label"] == 1 else "real"
+            target = dest / kind / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(image)
+            counts[kind] += 1
+
+            mask = _image_bytes(row["mask"])
+            if kind == "fake" and mask:
+                mask_file = dest / "mask" / f"{PurePosixPath(name).stem}_mask{_image_suffix(mask)}"
+                mask_file.parent.mkdir(parents=True, exist_ok=True)
+                mask_file.write_bytes(mask)
+                counts["mask"] += 1
+
+    if not counts["fake"] or counts["mask"] != counts["fake"]:
+        raise VerificationError(
+            f"CocoGlide parquet gave {counts['fake']} fakes but {counts['mask']} masks"
+        )
+    manifest["cocoglide"] = {
+        "path": release.COCOGLIDE_RELPATH,
+        "files": sum(counts.values()),
+        "counts": counts,
+        "verification": "unverified",
+        "parquet": {"source": source, "md5": parquet_md5, "sha256": parquet_sha},
+    }
+    print(f"Unpacked CocoGlide: {counts['fake']} fake + mask, {counts['real']} real "
+          f"(parquet SHA-256 {parquet_sha})")
+
+
 def _download_archive(url: str, root: Path, name: str) -> Path:
     target = root / "downloads" / name
     print(f"Downloading {url}")
@@ -306,6 +394,8 @@ def main(argv: list[str] | None = None) -> int:
     coco = parser.add_mutually_exclusive_group()
     coco.add_argument("--cocoglide", action="store_true", help="download the CocoGlide set")
     coco.add_argument("--cocoglide-zip", type=Path, help="use an already downloaded CocoGlide.zip")
+    coco.add_argument("--cocoglide-parquet", type=Path,
+                      help="use the Hugging Face copy (nebula/CocoGlide, needs pyarrow)")
     args = parser.parse_args(argv)
 
     root: Path = args.root.resolve()
@@ -342,6 +432,9 @@ def main(argv: list[str] | None = None) -> int:
 
         if args.cocoglide_zip:
             install_cocoglide(root, args.cocoglide_zip, "local archive", manifest)
+        elif args.cocoglide_parquet:
+            install_cocoglide_parquet(root, args.cocoglide_parquet,
+                                      "huggingface.co/datasets/nebula/CocoGlide", manifest)
         elif args.cocoglide:
             try:
                 archive = _download_archive(release.COCOGLIDE_URL, root, "CocoGlide.zip")

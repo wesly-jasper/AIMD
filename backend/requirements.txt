@@ -42,6 +42,7 @@ timm>=0.9                    # TruFor's SegFormer encoder (code fetched by scrip
 facenet-pytorch==2.5.3       # MTCNN face detection (2.6 pins torch<2.3 and numpy<2)
 mediapipe>=0.10.14,<0.11     # face landmarks
 ultralytics>=8.1             # YOLOv8 baseline object detector
+pyarrow>=15                  # reads the CocoGlide parquet (scripts/fetch_models.py --cocoglide-parquet)
 
 # --- Provenance --------------------------------------------------------------
 c2pa-python>=0.6             # C2PA Content Credentials verification
