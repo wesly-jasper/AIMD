@@ -108,6 +108,7 @@ backend/reports/
 node_modules/
 web/node_modules/
 web/dist/
+web/.vite/
 *.tsbuildinfo
 
 # Files queued for deletion (see _to_delete/MANIFEST.md)
