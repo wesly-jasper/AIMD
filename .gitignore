@@ -88,6 +88,8 @@ backend/yolov8n.pt
 backend/models/
 models/
 weights/
+# Source package, not model files: the rule above would hide new modules in it.
+!backend/app/services/detection/models/
 
 # ── Test Artifacts & Temporary Files ──────
 *.log

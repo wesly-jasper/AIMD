@@ -1,4 +1,10 @@
+import hashlib
+import json
+from pathlib import Path
+
+import numpy as np
 import pytest
+from PIL import Image
 
 from app.schemas.detection import (
     DetectionResult,
@@ -6,6 +12,7 @@ from app.schemas.detection import (
     DetectorExecutionStatus,
     ScoreSemantics,
 )
+from app.services.detection.detectors.image import trufor_detector as trufor_detector_module
 from app.services.detection.detectors.image.trufor_detector import (
     TruForDetector
 )
@@ -156,3 +163,77 @@ def test_trufor_detector_malformed_runner_result_is_failed(tmp_path):
     assert result.execution_status == DetectorExecutionStatus.FAILED
     assert "manipulation_detected" in result.status_reason
     assert result.produced_observations is False
+
+
+class MapRunner:
+    """A runner that returns heatmaps, as the real TruForRunner does."""
+
+    version_tag = "trufor-ae54475.w-0123456789ab"
+
+    def predict(self, file_path):
+        loc = np.zeros((32, 48), dtype=np.float32)
+        loc[8:24, 12:36] = 0.9
+        return {
+            "manipulation_detected": True,
+            "confidence": 0.81,
+            "regions": [{"type": "forgery_localization", "confidence": 0.9,
+                         "bbox": [12.0, 8.0, 24.0, 16.0], "extra": {"localization_max": 0.9}}],
+            "localization_map": loc,
+            "reliability_map": np.full((32, 48), 0.6, dtype=np.float32),
+            "metadata": {"checkpoint_sha256": "0123456789abcdef" * 4},
+        }
+
+
+def _png(path):
+    Image.fromarray(np.full((32, 48, 3), 128, dtype=np.uint8)).save(path)
+    return path
+
+
+def test_trufor_heatmaps_become_artefacts_not_metadata(tmp_path):
+    image = _png(tmp_path / "input.png")
+    artefacts_dir = tmp_path / "artefacts"
+
+    detector = TruForDetector(MapRunner(), artefacts_dir=artefacts_dir)
+    result = detector.detect(image)
+
+    assert result.execution_status == DetectorExecutionStatus.COMPLETED
+    assert result.detector_version == "2.0.0+trufor-ae54475.w-0123456789ab"
+    assert "execution_time_ms" in result.metadata
+    # Arrays never reach the stored metadata.
+    json.dumps(result.metadata)
+    assert "localization_map" not in result.metadata
+
+    artefacts = result.metadata["artefacts"]
+    assert set(artefacts) == {"localization_map", "reliability_map", "overlay"}
+    for entry in artefacts.values():
+        relative = Path(entry["path"])
+        assert not relative.is_absolute()
+        assert str(tmp_path) not in entry["path"]
+        written = artefacts_dir / relative
+        assert written.is_file()
+        assert entry["sha256"] == hashlib.sha256(written.read_bytes()).hexdigest()
+        assert entry["media_type"] == "image/png"
+        with Image.open(written) as png:
+            assert png.size == (48, 32)
+
+    assert "0123456789ab" in artefacts["localization_map"]["path"]
+    region = result.regions[0]
+    assert region.mask_path == artefacts["localization_map"]["path"]
+    assert region.extra == {"localization_max": 0.9}
+
+
+def test_trufor_heatmap_write_failure_keeps_the_score(tmp_path, monkeypatch):
+    """A lost heatmap is recorded; the model's score is still a valid observation."""
+    image = _png(tmp_path / "input.png")
+
+    def broken(*args, **kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(trufor_detector_module, "write_heatmap_artefacts", broken)
+    result = TruForDetector(MapRunner(), artefacts_dir=tmp_path).detect(image)
+
+    assert result.execution_status == DetectorExecutionStatus.COMPLETED
+    assert result.confidence == 0.81
+    assert result.metadata["artefacts_error"] == "OSError"
+    assert "artefacts" not in result.metadata
+    assert result.regions[0].mask_path is None

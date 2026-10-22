@@ -32,7 +32,7 @@ class DetectorFactory:
             )
 
         try:
-            runner = TruForRunner(settings.trufor_model_path)
+            runner = TruForRunner(settings.trufor_model_path, device=settings.device)
             runner.load()
             return TruForDetector(runner)
         except Exception as exc:

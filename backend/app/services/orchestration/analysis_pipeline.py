@@ -370,6 +370,8 @@ class AnalysisPipeline:
                         "region_type": r.get("type", "unknown"),
                         "confidence": r.get("confidence", 0.0),
                         "bbox": r.get("bbox"),
+                        # Relative to settings.artefacts_dir (e.g. a TruFor heatmap).
+                        "mask_path": r.get("mask_path"),
                         "start_timestamp": r.get("start_timestamp"),
                         "end_timestamp": r.get("end_timestamp"),
                     }

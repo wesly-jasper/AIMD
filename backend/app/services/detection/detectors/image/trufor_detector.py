@@ -1,4 +1,5 @@
 import logging
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -10,6 +11,7 @@ from app.schemas.detection import (
     ScoreSemantics,
 )
 from app.services.detection.detectors.base_detector import BaseDetector
+from app.services.evidence.heatmap_artefacts import write_heatmap_artefacts
 
 logger = logging.getLogger(__name__)
 
@@ -32,14 +34,26 @@ class TruForDetector(BaseDetector):
     #: factory and the engine all said ``"TruForDetector"``, so the "learned"
     #: signal family never matched a single result.
     detector_id = "TruForDetector"
-    version = "1.0.0"
+    #: Version of this wrapper. A loaded runner extends it per instance with the
+    #: upstream commit and the checkpoint hash, so a result names the exact
+    #: weights that produced it.
+    version = "2.0.0"
     supported_media_types = frozenset({"image"})
     manipulation_type = "image_manipulation"
     score_semantics = ScoreSemantics.RAW_MODEL_SCORE
 
-    def __init__(self, runner: Any | None, initialization_error: str | None = None):
+    def __init__(
+        self,
+        runner: Any | None,
+        initialization_error: str | None = None,
+        artefacts_dir: Optional[Path] = None,
+    ):
         self.runner = runner
         self.initialization_error = initialization_error
+        self.artefacts_dir = artefacts_dir
+        tag = getattr(runner, "version_tag", None)
+        if isinstance(tag, str) and tag:
+            self.version = f"{type(self).version}+{tag}"
 
     def availability(self) -> tuple[DetectorAvailability, Optional[str]]:
         """
@@ -67,6 +81,7 @@ class TruForDetector(BaseDetector):
         if availability is not DetectorAvailability.AVAILABLE:
             return self.unavailable(reason or "TruFor runner is unavailable")
 
+        started = time.perf_counter()
         try:
             result = self.runner.predict(path)
         except Exception as exc:
@@ -85,6 +100,30 @@ class TruForDetector(BaseDetector):
                 "TruFor runner result missing 'manipulation_detected' or 'confidence'"
             )
 
+        metadata: Dict[str, Any] = dict(result.get("metadata", {}))
+        # The maps are arrays: they become files, never metadata.
+        localization_map = result.get("localization_map")
+        reliability_map = result.get("reliability_map")
+        mask_path: Optional[str] = None
+        if localization_map is not None:
+            try:
+                artefacts = write_heatmap_artefacts(
+                    path,
+                    localization_map,
+                    reliability_map,
+                    producer="trufor",
+                    model_tag=(metadata.get("checkpoint_sha256") or "unknown")[:12],
+                    root=self.artefacts_dir,
+                )
+            except Exception as exc:
+                # The score is still a valid observation without its heatmap, so
+                # the run stays COMPLETED -- but the missing evidence is recorded.
+                logger.warning("TruFor heatmap could not be saved: %s", exc)
+                metadata["artefacts_error"] = type(exc).__name__
+            else:
+                metadata["artefacts"] = artefacts
+                mask_path = artefacts["localization_map"]["path"]
+
         # Parse regions into DetectionRegion instances
         regions: List[DetectionRegion] = []
         raw_regions = result.get("regions", [])
@@ -97,9 +136,14 @@ class TruForDetector(BaseDetector):
                         type=r.get("type", "forgery_localization"),
                         confidence=r.get("confidence", result.get("confidence", 0.0)),
                         bbox=r.get("bbox"),
-                        mask_path=r.get("mask_path"),
+                        # Every region points at the full-image localization map
+                        # it was cut from; the bbox says where to look in it.
+                        mask_path=r.get("mask_path") or mask_path,
+                        extra=r.get("extra"),
                     )
                 )
+
+        metadata["execution_time_ms"] = round((time.perf_counter() - started) * 1000.0, 1)
 
         # The runner may report that it ran but could not reach a determination.
         # That is INCONCLUSIVE -- a completed run with no finding -- and is not the
@@ -115,7 +159,7 @@ class TruForDetector(BaseDetector):
             return self.inconclusive(
                 f"TruFor reported no determination (runner assessment: {declared!r})",
                 regions=regions,
-                metadata=result.get("metadata", {}),
+                metadata=metadata,
             )
 
         return DetectionResult(
@@ -129,5 +173,5 @@ class TruForDetector(BaseDetector):
             execution_status=DetectorExecutionStatus.COMPLETED,
             score_semantics=self.score_semantics,
             regions=regions,
-            metadata=result.get("metadata", {}),
+            metadata=metadata,
         )

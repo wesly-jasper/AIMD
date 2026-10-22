@@ -49,14 +49,16 @@ def trufor_configuration_status() -> str:
     """
     Report TruFor *configuration*, not capability.
 
-    "configured" means a model path is set and the file exists. It does NOT mean
-    the checkpoint was validated, that the architecture is present, or that
-    inference would succeed. TruFor availability is only known when the runner is
+    "configured" means a model path is set and a checkpoint is there: the path is
+    the checkpoint file, or a TruFor root holding one. It does NOT mean the
+    checkpoint was validated, that the architecture is present, or that inference
+    would succeed. TruFor availability is only known when the runner is
     constructed.
     """
     if not settings.trufor_enabled:
         return "disabled"
-    if settings.trufor_model_path and settings.trufor_model_path.exists():
+    path = settings.trufor_model_path
+    if path and (path.is_file() or (path / "weights" / "trufor.pth.tar").is_file()):
         return "configured"
     return "model_missing"
 

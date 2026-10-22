@@ -17,6 +17,9 @@ class Settings(BaseSettings):
     processed_dir: Path = BASE_DIR / "processed"
     frames_dir: Path = BASE_DIR / "processed" / "frames"
     keyframes_dir: Path = BASE_DIR / "processed" / "keyframes"
+    # Detector outputs kept as evidence (heatmaps, masks). Inside processed_dir,
+    # so inside the evidence roots; results store paths relative to this.
+    artefacts_dir: Path = BASE_DIR / "processed" / "artefacts"
 
     max_file_size_mb: int = 500
 
@@ -65,6 +68,7 @@ class Settings(BaseSettings):
 
     # ── Optional ML models ────────────────────────────────────────────────────
     trufor_enabled: bool = False
+    # The TruFor root scripts/fetch_models.py installs into (backend/models/trufor).
     trufor_model_path: Optional[Path] = None
     ai_image_model_path: Optional[Path] = None
     deepfake_model_path: Optional[Path] = None
