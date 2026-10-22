@@ -344,3 +344,62 @@ def test_unavailable_detector_cannot_make_low_confidence_result_clean():
     result = engine._aggregate([unavailable, low_confidence_clean])
 
     assert result["assessment"] == "INCONCLUSIVE"
+
+def test_skipped_non_evidential_detector_does_not_force_inconclusive():
+    """
+    Regression: an unavailable object detector made every image INCONCLUSIVE.
+
+    Object presence is not manipulation evidence, so its absence cannot be a gap
+    in coverage either. It stays listed so the record shows it did not run.
+    """
+    from app.schemas.detection import DetectorAvailability, DetectorExecutionStatus
+
+    engine = ImageDetectionEngine()
+    skipped_object = DetectionResult(
+        detector="BaselineObjectDetector",
+        media_type="image",
+        manipulation_detected=False,
+        confidence=0.0,
+        manipulation_type="object",
+        availability=DetectorAvailability.UNAVAILABLE,
+        execution_status=DetectorExecutionStatus.SKIPPED,
+        score_semantics="NOT_APPLICABLE",
+        status_reason="no object model",
+    )
+    quiet = DetectionResult(
+        detector="CopyMoveDetector",
+        media_type="image",
+        manipulation_detected=False,
+        confidence=0.05,
+        manipulation_type="copy_move",
+    )
+
+    result = engine._aggregate([skipped_object, quiet])
+
+    assert result["assessment"] == "NO_SIGNIFICANT_ANOMALIES_DETECTED"
+    assert result["analysis_complete"] is True
+    assert [d["detector"] for d in result["incomplete_detectors"]] == [
+        "BaselineObjectDetector"
+    ]
+
+
+def test_only_inconclusive_detectors_cannot_report_no_anomalies():
+    """Nothing reached a determination, so "no anomalies" was never observed."""
+    from app.schemas.detection import DetectorExecutionStatus
+
+    engine = ImageDetectionEngine()
+    heuristic = DetectionResult(
+        detector="ManipulationMaskGenerator",
+        media_type="image",
+        manipulation_detected=False,
+        confidence=0.0,
+        manipulation_type="manipulation",
+        execution_status=DetectorExecutionStatus.INCONCLUSIVE,
+        score_semantics="NOT_APPLICABLE",
+    )
+
+    result = engine._aggregate([heuristic])
+
+    assert result["assessment"] == "INCONCLUSIVE"
+    assert result["undetermined_detectors"] == ["ManipulationMaskGenerator"]
+    assert "could not support a determination" in result["assessment_rationale"]

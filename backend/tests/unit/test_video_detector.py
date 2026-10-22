@@ -189,6 +189,79 @@ def test_tracked_regions_do_not_inflate_the_anomaly_score():
     assert "tracked_confidence_boost" not in with_tracking.metadata
 
 
+def _write_video(path, frames=6):
+    import cv2
+    import numpy as np
+
+    writer = cv2.VideoWriter(str(path), cv2.VideoWriter_fourcc(*"MJPG"), 1.0, (64, 48))
+    rng = np.random.default_rng(0)
+    for _ in range(frames):
+        writer.write(rng.integers(0, 256, (48, 64, 3), dtype=np.uint8))
+    writer.release()
+
+
+class _ReturningDetector:
+    """A frame detector that reports its outcome instead of raising."""
+
+    def __init__(self, execution_status, availability=DetectorAvailability.AVAILABLE):
+        self.execution_status = execution_status
+        self.availability = availability
+
+    def detect(self, _path):
+        return DetectionResult(
+            detector="Stub", media_type="image", manipulation_detected=False,
+            confidence=0.0, manipulation_type="unknown",
+            availability=self.availability, execution_status=self.execution_status,
+            status_reason="stub",
+        )
+
+
+def _engine_with(image_status, face_status):
+    engine = VideoDetectionEngine()
+    engine._image_detector = _ReturningDetector(image_status)
+    engine._face_detector = _ReturningDetector(face_status)
+    return engine
+
+
+def test_failed_frame_results_are_failures_not_clean_frames(tmp_path):
+    """Regression: a returned FAILED result was counted as a CLEAN frame."""
+    video = tmp_path / "v.avi"
+    _write_video(video)
+    engine = _engine_with(DetectorExecutionStatus.FAILED, DetectorExecutionStatus.COMPLETED)
+
+    detection = engine.detect(video)["detections"][0]
+
+    assert detection.assessment != Assessment.NO_SIGNIFICANT_ANOMALIES_DETECTED
+    failures = detection.metadata["detector_failures"]
+    assert failures["image_detector_failures"] == failures["total_frames_analyzed"] > 0
+
+
+def test_failure_counters_reset_between_videos(tmp_path):
+    """Regression: counters were per-engine, so one bad video tainted the next."""
+    video = tmp_path / "v.avi"
+    _write_video(video)
+    engine = _engine_with(DetectorExecutionStatus.FAILED, DetectorExecutionStatus.COMPLETED)
+    engine.detect(video)
+
+    engine._image_detector = _ReturningDetector(DetectorExecutionStatus.COMPLETED)
+    detection = engine.detect(video)["detections"][0]
+
+    assert detection.metadata["detector_failures"]["image_detector_failures"] == 0
+    assert detection.metadata["failure_messages"] == []
+    assert detection.assessment == Assessment.NO_SIGNIFICANT_ANOMALIES_DETECTED
+
+
+def test_inconclusive_frame_detector_cannot_support_a_negative(tmp_path):
+    video = tmp_path / "v.avi"
+    _write_video(video)
+    engine = _engine_with(DetectorExecutionStatus.INCONCLUSIVE, DetectorExecutionStatus.COMPLETED)
+
+    detection = engine.detect(video)["detections"][0]
+
+    assert detection.assessment == Assessment.INCONCLUSIVE
+    assert detection.metadata["detector_failures"]["image_detector_failures"] == 0
+
+
 def test_majority_frame_detector_failure_outranks_a_positive_proportion():
     """
     A positive proportion computed from a minority of frames is not reported.

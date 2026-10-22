@@ -37,14 +37,61 @@ def test_valid_image_generates_heatmap_with_original_dimensions_and_schema(tmp_p
     assert result.metadata["status"] == "active_mask_generation"
     assert result.metadata["heatmap_shape"] == [128, 160]
     assert result.metadata["regions_found"] == len(result.regions)
-    assert 0.0 <= result.confidence <= 1.0
-    assert result.assessment in (Assessment.CLEAN, Assessment.SUSPICIOUS)
+    assert result.metadata["heatmap_units"] == "robust_z"
+    # An uncalibrated heuristic: it ran and keeps its regions, but it never
+    # reports a determination in either direction.
+    assert result.execution_status == DetectorExecutionStatus.INCONCLUSIVE
+    assert result.produced_observations is True
+    assert result.manipulation_detected is False
+    assert result.assessment == Assessment.INCONCLUSIVE
     for region in result.regions:
+        assert 0.0 <= region.confidence <= 1.0
         assert region.type == "manipulation_mask"
         assert region.bbox is not None
         x, y, width, height = region.bbox
         assert 0 <= x <= 160 and 0 <= y <= 128
         assert 0 < width <= 160 and 0 < height <= 128
+
+
+def test_every_cue_is_weighted_in_the_fusion(monkeypatch):
+    """Regression: 7 cue maps were zipped with 6 weights, dropping colour."""
+    generator = ManipulationMaskGenerator()
+    seen = []
+    original = generator._robust_z
+
+    def spy(cue):
+        seen.append(cue)
+        return original(cue)
+
+    monkeypatch.setattr(generator, "_robust_z", spy)
+    image = np.random.default_rng(1).integers(0, 256, (96, 96, 3), dtype=np.uint8)
+    generator._generate_single_scale_heatmap(image)
+
+    # 3 ELA quality factors + FFT + noise + gradient + colour.
+    assert len(seen) == len(generator.quality_factors) + 4
+
+
+def test_uniform_texture_produces_no_outlier_regions(tmp_path):
+    """
+    Regression: per-image min-max normalisation guaranteed "suspicious" regions.
+
+    Stretching every cue to [0, 1] forces some pixels to 1.0 in any image, so a
+    fixed threshold always found regions. Robust z-scores leave a homogeneous
+    image with nothing that stands out.
+    """
+    image_path = tmp_path / "uniform.png"
+    noise = np.random.default_rng(3).normal(128, 8, (128, 160, 3))
+    assert cv2.imwrite(str(image_path), noise.clip(0, 255).astype(np.uint8))
+
+    result = ManipulationMaskGenerator().detect(str(image_path))
+
+    assert result.regions == []
+    assert result.metadata["regions_found"] == 0
+
+
+def test_robust_z_does_not_stretch_a_flat_map():
+    flat = np.full((32, 32), 0.4, dtype=np.float32)
+    assert np.all(ManipulationMaskGenerator._robust_z(flat) == 0.0)
 
 
 def test_invalid_and_empty_images_are_failed_not_clean(tmp_path):

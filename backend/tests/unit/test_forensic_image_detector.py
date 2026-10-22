@@ -28,9 +28,47 @@ def test_forensic_image_detector_execution(tmp_path):
     assert "ela_score" in result.metadata
     assert "fft_spectral_score" in result.metadata
     assert "noise_inconsistency_score" in result.metadata
-    assert result.assessment.value == (
-        "SUSPICIOUS" if result.manipulation_detected else "CLEAN"
-    )
+
+
+def test_heuristic_scores_are_inconclusive_not_a_determination(tmp_path):
+    """
+    Regression: every ordinary camera JPEG used to be reported as manipulated.
+
+    The hand-weighted ELA/FFT/noise composite exceeded its 0.50 threshold on
+    clean photographs, because all three cues respond to normal JPEG
+    compression. Without calibration it may not decide either way.
+    """
+    import numpy as np
+
+    rng = np.random.default_rng(7)
+    base = rng.normal(128, 30, (256, 256, 3)).clip(0, 255).astype("uint8")
+    img_path = tmp_path / "camera_like.jpg"
+    Image.fromarray(base).save(str(img_path), quality=90)
+
+    result = ForensicImageDetector().detect(str(img_path))
+
+    assert result.execution_status == DetectorExecutionStatus.INCONCLUSIVE
+    assert result.manipulation_detected is False
+    assert result.score_semantics == ScoreSemantics.NOT_APPLICABLE
+    assert result.assessment.value == "INCONCLUSIVE"
+    assert "composite_severity" in result.metadata
+    assert "uncalibrated" in result.status_reason.lower()
+
+
+def test_generator_named_in_metadata_is_a_positive_observation(tmp_path):
+    from PIL import PngImagePlugin
+
+    info = PngImagePlugin.PngInfo()
+    info.add_text("parameters", "Steps: 30, Sampler: Euler, Model: Stable Diffusion XL")
+    img_path = tmp_path / "generated.png"
+    Image.new("RGB", (128, 128), color="cyan").save(str(img_path), pnginfo=info)
+
+    result = ForensicImageDetector().detect(str(img_path))
+
+    assert result.execution_status == DetectorExecutionStatus.COMPLETED
+    assert result.manipulation_detected is True
+    assert result.manipulation_type == "ai_generated_synthetic"
+    assert "stable diffusion" in result.status_reason.lower()
 
 
 def test_invalid_image_is_failed_not_unavailable(tmp_path):

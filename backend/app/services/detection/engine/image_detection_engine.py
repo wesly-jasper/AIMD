@@ -186,10 +186,17 @@ class ImageDetectionEngine:
         usable = [r for r in results if r.produced_observations]
         incomplete = [r for r in results if not r.produced_observations]
 
-        # Evidential usable results only -- a non-evidential detector must not be
-        # able to influence the assessment in either direction.
+        # Evidential results only -- a non-evidential detector must not be able
+        # to influence the assessment in either direction. That includes its
+        # absence: a skipped object detector used to count as "incomplete
+        # coverage" and turned every assessment INCONCLUSIVE, although object
+        # presence is not evidence either way. It is still listed in
+        # ``incomplete_detectors`` so the record shows what did not run.
         evidential = [
             r for r in usable if self._family(r.detector) != _NON_EVIDENTIAL
+        ]
+        incomplete_evidential = [
+            r for r in incomplete if self._family(r.detector) != _NON_EVIDENTIAL
         ]
 
         positive = [r for r in evidential if r.manipulation_detected]
@@ -197,6 +204,12 @@ class ImageDetectionEngine:
             r for r in evidential
             if not r.manipulation_detected
             and r.execution_status is DetectorExecutionStatus.COMPLETED
+        ]
+        # Ran, but could not support a determination (e.g. uncalibrated
+        # heuristics). Neither positive nor negative.
+        undetermined = [
+            r for r in evidential
+            if r.execution_status is DetectorExecutionStatus.INCONCLUSIVE
         ]
 
         positive_families = {self._family(r.detector) for r in positive}
@@ -230,7 +243,8 @@ class ImageDetectionEngine:
             negative=negative,
             positive_families=positive_families,
             contradicted=contradicted,
-            incomplete=incomplete,
+            incomplete=incomplete_evidential,
+            undetermined=undetermined,
         )
 
         all_regions: list[Any] = []
@@ -245,7 +259,8 @@ class ImageDetectionEngine:
             "contradicting_observations": [r.detector for r in negative],
             "detector_scores": detector_scores,
             "incomplete_detectors": missing,
-            "analysis_complete": not incomplete,
+            "undetermined_detectors": [r.detector for r in undetermined],
+            "analysis_complete": not incomplete_evidential,
             # Retained for traceability: which detector reported the strongest
             # signal. This is NOT a composite and carries that detector's
             # semantics only.
@@ -264,6 +279,7 @@ class ImageDetectionEngine:
         positive_families: set[str],
         contradicted: bool,
         incomplete: list[DetectionResult],
+        undetermined: list[DetectionResult] = (),
     ) -> tuple[Assessment, EvidenceStrength, str]:
         # 1. Nothing usable ran -> no determination is possible.
         if not evidential:
@@ -336,15 +352,37 @@ class ImageDetectionEngine:
                 "that did not run.",
             )
 
-        # 4. No positive observations and full coverage. This is the strongest
+        # 4. Every detector that ran was inconclusive. Nothing reached a
+        #    determination, so "no anomalies" would be a claim nobody made.
+        if not negative:
+            names = ", ".join(sorted(r.detector for r in undetermined))
+            return (
+                Assessment.INCONCLUSIVE,
+                EvidenceStrength.NONE,
+                f"The {len(undetermined)} detector(s) that ran ({names}) could not "
+                "support a determination either way, so no conclusion about this "
+                "image is supported.",
+            )
+
+        # 5. No positive observations and full coverage. This is the strongest
         #    negative statement the system is entitled to make, and it is still
         #    not a finding of authenticity.
+        rationale = (
+            f"{len(negative)} evidential detector(s) completed and none "
+            "reported anomalies above their thresholds."
+        )
+        if undetermined:
+            rationale += (
+                f" {len(undetermined)} more ran but could not support a "
+                f"determination ({', '.join(sorted(r.detector for r in undetermined))})."
+            )
+        rationale += (
+            " This records what was looked for and not found; it is not a finding "
+            "of authenticity, and manipulation that these detectors cannot measure "
+            "would not appear here."
+        )
         return (
             Assessment.NO_SIGNIFICANT_ANOMALIES_DETECTED,
             EvidenceStrength.NONE,
-            f"All {len(evidential)} evidential detector(s) completed and none "
-            "reported anomalies above their thresholds. This records what was "
-            "looked for and not found; it is not a finding of authenticity, and "
-            "manipulation that these detectors cannot measure would not appear "
-            "here.",
+            rationale,
         )

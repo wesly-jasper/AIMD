@@ -1,319 +1,352 @@
-# AIMD Sentinel — Project Audit
+# AIMD Sentinel — Project Audit (Phase 0, re-run)
 
-**Audit date:** 2026-10-20
-**Audited tree:** `D:\projects\AIMD-2` (working tree, *not* HEAD — 25 files were modified and uncommitted at audit time)
-**Auditor method:** source reading + executed verification. Every claim below is labelled with how it was established.
+**Audit date:** 2026-10-22
+**Audited tree:** `D:\projects\AIMD-2` at commit `6e6ddea` (clean working tree apart from untracked `web/.vite/`)
+**Previous audit:** 2026-10-20, against an older, uncommitted tree. This document replaces it; every finding from that audit is carried forward below with its current status.
+**Method:** source reading plus executed verification (FastAPI `TestClient` against throwaway SQLite databases and temp storage; `backend/aimd.db` and `backend/uploads/` were not touched).
 
 ---
 
-## 0. Evidence standard used in this document
+## 0. Evidence standard
 
 | Tag | Meaning |
 |---|---|
-| **[EXECUTED]** | I ran it and observed the result. Highest confidence. |
-| **[READ]** | Established by reading the code at a cited `file:line`. |
-| **[UNVERIFIED]** | Plausible but not confirmed. Treated as an open question, never as fact. |
+| **[EXECUTED]** | Ran it and observed the result. |
+| **[READ]** | Established by reading the code at the cited `file:line`. |
+| **[UNVERIFIED]** | Plausible but not confirmed. |
 
-Detector capability states use the vocabulary required by the project spec:
-`IMPLEMENTED_AND_VERIFIED` / `IMPLEMENTED_BUT_UNVERIFIED` / `PARTIALLY_IMPLEMENTED` / `UNAVAILABLE` / `PLANNED`.
+Status vocabulary for previous findings: **FIXED** / **PARTIALLY FIXED** / **STILL OPEN** / **N/A** (the code was removed).
+Detector capability states: `IMPLEMENTED_AND_VERIFIED` / `IMPLEMENTED_BUT_UNVERIFIED` / `PARTIALLY_IMPLEMENTED` / `UNAVAILABLE` / `PLANNED`.
 
----
-
-## 1. Environment baseline [EXECUTED]
-
-| Item | Value |
-|---|---|
-| Python | 3.14.2 (`venv/`) — note `requirements.txt:3` claims 3.11.9 |
-| torch | 2.9.1+cu126, **CUDA available: True** |
-| GPU | NVIDIA GeForce RTX 3050 Laptop GPU |
-| FastAPI / SQLAlchemy / Alembic | 0.135.3 / 2.0.49 / 1.18.4 |
-| OpenCV / Pillow / NumPy | 5.0.0 / 12.1.0 / 2.4.1 |
-| ultralytics / mediapipe / librosa | 8.4.60 / 0.10.35 / 1.0.0 |
-| Database | SQLite, live at `backend/aimd.db` (~2.4 MB) |
-
-**Installed during audit** (were declared-but-absent or undeclared): `reportlab 5.0.1`, `openai 3.35.1`, `exifread 3.5.1`, `pytest-timeout`.
-`openai` is required for Nebius (OpenAI-compatible API) and was **not** in `requirements.txt`.
-`mediapipe` is **installed but not declared** in `requirements.txt` — a clean `pip install -r` would silently disable face-region analysis.
-
-### Baseline test suite [EXECUTED]
-
-```
-132 passed, 5 failed, 1 skipped  (97.50s)
-```
-
-All 5 failures are **pre-existing**, present before any change by me, and share one root cause:
-
-- `tests/integration/test_detection_api.py::test_detection_api_missing_file` — `assert 404 == 400`
-- `…::test_detection_api_missing_media_type` — `assert 404 == 400`
-- `…::test_detection_api_invalid_request` — `assert 404 == 422`
-- `tests/integration/test_analysis_pipeline.py::test_full_pipeline_image` — `assert 404 == 200`
-- `tests/integration/test_live_api_e2e.py::test_e2e_image_investigation`
-
-**Root cause [READ]:** the detection router is commented out of the app.
-`app/main.py:14` `# from app.api.v1.endpoints.detection import router as detection_router`
-`app/main.py:63` `# app.include_router(detection_router, prefix="/api/v1")`
-So every `/api/v1/detection/*` path 404s even though `endpoints/detection.py` defines handlers.
+All paths below are relative to `backend/` unless they start with `web/` or `docs/`.
 
 ---
 
-## 2. CRITICAL SECURITY FINDINGS
+## 1. Headline
 
-### SEC-1 — Unauthenticated arbitrary file read [EXECUTED — exploit confirmed]
+**Fixed since 2026-10-20:** every critical and high security finding, the 5 failing tests, the no-op migrations, fail-open auth, the fabricated SHA-256, the missing Case / Observation / Finding / Assessment / AuditEvent / User tables, the blended weighted-mean confidence in the image engine, and the frontend's mock data.
 
-**Severity: Critical.** Confirmed by running the exploit against the real app, not inferred.
+**Still open:** there is **no learned forensic detector** (no TruFor weights, no AI-generation model), **no Nebius/Nemotron integration**, **no external source search**, and analysis still runs inline in the HTTP request. In addition, executed tests show the image pipeline **flags every unmanipulated image tested as SUSPICIOUS** (§4.3). That has to be fixed before any demo result means anything.
 
-Two-step chain:
-1. `POST /api/v1/source/trace` accepts a client-controlled `file_path` and writes it verbatim into the `media` table — `app/api/v1/endpoints/investigation.py:125` `"file_path": str(request.file_path)`. No containment check, no existence requirement, no authentication.
-2. `GET /api/v1/media/{id}/download` serves that path via `FileResponse` — `app/api/v1/endpoints/media.py:95-103`.
+---
 
-Proof of exploitation (executed): wrote a canary file outside `uploads/`, then
+## 2. Baseline [EXECUTED]
 
-```
-POST /api/v1/source/trace {"media_id":"pentest-1","analysis_id":"pentest-a1","file_path":"<canary>"}  -> 200
-GET  /api/v1/media/pentest-1/download                                                                 -> 200
-body: TOP-SECRET-CANARY-VALUE
-```
-
-Any file readable by the server process is exfiltratable, **including `backend/aimd.db` and `backend/.env`**. A sanitising helper `ensure_safe_path` exists at `app/core/security.py:31` but is **imported by nothing** [READ].
-*Test artifacts created during this proof were deleted from `aimd.db` and temp.*
-
-### SEC-2 — Fabricated cryptographic hash written into the evidence table [EXECUTED]
-
-`investigation.py:129` hardcodes
-`"sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"`.
-I computed `sha256(b"")` and it is **exactly that value** — the digest of the empty byte string.
-
-A fabricated hash is persisted into the forensic record and later re-served as `"evidence_category": "FACT"` (`services/evidence/evidence_service.py:76-77`). This is the single most serious *integrity* defect in the system: it violates the project's own stated rule at `evidence_service.py:4` ("must NEVER use hardcoded or mock values") and would invalidate any custody claim.
-
-### SEC-3 — Fail-open authentication [READ]
-
-`app/core/auth.py:13` sets `auto_error=False`; `app/api/v1/endpoints/auth.py:73-76` returns a synthetic user when no token is supplied:
-
-```python
-if token is None:
-    return User(username="anonymous_analyst", role="investigator", is_active=True)
-```
-
-A tokenless `GET /api/v1/auth/me` returns 200 with an `investigator` role.
-
-### SEC-4 — Authentication not applied to any functional route [READ]
-
-`get_current_user` is referenced by exactly one endpoint (`auth.py:90`). All other routes — upload, download, analysis, evidence, reports, jobs — are anonymous. No router-level or global dependency.
-
-### SEC-5 — Privilege escalation via open self-registration [READ]
-
-`endpoints/auth.py:36` takes `role` from the request body and `:73` writes it through. Anyone may register as `admin`. No password policy, no invite, no rate limit.
-
-### SEC-6 — Hardcoded signing key, unrotatable [READ]
-
-`app/core/auth.py:9` `SECRET_KEY = "aimd_forensic_platform_secret_key_change_in_production"`, duplicated at `app/core/config.py:93`. Token signing uses the **module constant**, not `settings.secret_key`, so setting the env var does not change signing behaviour. Anyone with the repo can forge a token.
-
-### SEC-7 — Other confirmed issues [READ]
-
-| ID | Issue | Location |
+| Item | 2026-10-20 | 2026-10-22 |
 |---|---|---|
-| SEC-7a | Arbitrary-path hashing / existence oracle | `investigation.py:40-44` (`/fingerprint/generate`), `:83` (`/similarity/search`) |
-| SEC-7b | Whole upload buffered in RAM *before* the size check | `media_ingestion.py:128-134` (`await file.read()` then `len(data) >`) |
-| SEC-7c | Rate limiting configured but inert — `SlowAPIMiddleware` never added, no `@limiter.limit` anywhere | `main.py:24,48-49` |
-| SEC-7d | Raw exception text returned to clients (leaks absolute paths) | `media.py:32`, `analysis.py:55`, `investigation.py:234,282,335` |
-| SEC-7e | Unescaped HTML report → injection via attacker-controlled filename | `investigation.py:296-309` |
-| SEC-7f | Forensic PDF written to shared temp with predictable name, never deleted | `investigation.py:327` |
-| SEC-7g | Unbounded pagination (`?limit=1000000` accepted) | `media.py:108`, `analysis.py:129`, `jobs.py:57` |
-| SEC-7h | Registered error handlers never attached, so the documented error envelope is never produced | `core/exceptions.py` unused by `main.py` |
+| Backend tests | 132 passed, 5 failed, 1 skipped | **311 passed, 0 failed, 1 skipped** (93.8 s) |
+| Frontend build (`web/`, `tsc -b && vite build`) | not run | **passes** (263 kB JS / 24 kB CSS) |
+| Python in `venv/` | 3.14.2 | 3.14.2 (still differs from the declared 3.11.9 and Dockerfile `python:3.11-slim`) |
+| GPU | RTX 3050 Laptop, CUDA available | unchanged |
+| Database | SQLite, `create_all()` | SQLite, built by Alembic `upgrade head` |
 
-**No SQL injection found** [READ] — all DB access uses SQLAlchemy bound constructs.
+Test-run warning worth fixing: `SAWarning: DELETE statement on table 'observations' expected to delete 5 row(s); 0 were matched` (`app/db/repository.py:137`, from `test_ownership.py`). The ORM and the DB-level cascade both try to delete the same rows.
 
 ---
 
-## 3. Detector capability matrix
+## 3. Security
 
-Checkpoint inventory on disk [EXECUTED] — the *only* two model files in the repo:
+### 3.1 Previous findings
 
-```
-backend/models/face_landmarker.task   3,758,596 B
-backend/yolov8n.pt                    6,549,796 B
-```
-
-Live inference smoke test [EXECUTED]: `YOLO('yolov8n.pt').predict(...)` → ran, returned boxes. MediaPipe `FaceLandmarker.create_from_options(...)` → loaded successfully.
-
-| Detector | Wired? | State | Basis |
+| ID | Finding (2026-10-20) | Status | Evidence |
 |---|---|---|---|
-| **TruForDetector** | **No** — never constructed | **UNAVAILABLE** | `backend/.env`: `TRUFOR_ENABLED=false`, `TRUFOR_MODEL_PATH=` empty; `detector_factory.py:25-26` returns `None` [EXECUTED+READ] |
-| ForensicImageDetector | Yes | PARTIALLY_IMPLEMENTED | Real ELA/FFT/noise DSP, but hardcoded thresholds; returns literal `0.1` on every exception path [READ] |
-| CopyMoveDetector | Yes | PARTIALLY_IMPLEMENTED | Real SIFT + RANSAC; confidence floor hardcoded `0.3 + 0.6*ratio` [READ] |
-| FaceRegionAnalyzer | Yes | PARTIALLY_IMPLEMENTED | Real MediaPipe landmarks; heuristic scoring incl. a literal `0.3` appended per Hough circle [READ] |
-| ManipulationMaskGenerator | Yes | PARTIALLY_IMPLEMENTED | Real multi-scale DSP; UNet path is a confirmed `# TODO` stub; **silent fusion bug** (below) [READ] |
-| BaselineObjectDetector | Yes | UNAVAILABLE *by design* | Returns a constant `UNAVAILABLE`; honest, weight 0.00 [READ] |
-| YOLOv8ObjectDetector | **No** | IMPLEMENTED_AND_VERIFIED (unwired) | Real inference confirmed [EXECUTED]; weights present; never added to the container |
-| BaselineFaceDetector | Yes | PARTIALLY_IMPLEMENTED | Real Haar + Laplacian/FFT, but score can only take 4 discrete values [READ] |
-| DeepLearningFaceDetector (MTCNN) | **No** | IMPLEMENTED_BUT_UNVERIFIED (unwired) | MTCNN weights ship inside `facenet_pytorch` [READ] |
-| BaselineAudioAnalyzer | **No** — unreachable | PARTIALLY_IMPLEMENTED | Real librosa features, but **verdict hardcoded** `manipulation_detected=False`, `INCONCLUSIVE` regardless of score [READ] |
-| NeuralSpeechDetector | **No** — unreachable | **Misleadingly named** | **Contains no neural inference at all** — two `if` statements on mel-spectrogram stats; imports `torch` and never uses it, yet reports `status="active_neural_speech_detector"`, version `"2.0-neural-acoustic"` [READ] |
-| BaselineVideoDetector | **No** | PARTIALLY_IMPLEMENTED | Pass-through that keeps only `detections[0]`, discarding the rest [READ] |
+| SEC-1 | Unauthenticated arbitrary file read via persisted `file_path` | **FIXED** | Download resolves through `resolve_evidence_path` (`app/api/v1/endpoints/media.py:208`, `app/core/security.py:71-111`); stored path is UUID-derived (`app/services/ingestion/media_ingestion.py:158-164`) [READ]. Traversal filename + injected `file_path` stored inside the upload dir; a tampered out-of-root DB path returns 400 [EXECUTED] |
+| SEC-2 | Fabricated SHA-256 (`sha256(b"")`) written as FACT | **FIXED** | No 64-hex literal in `app/`; hash computed at `media_ingestion.py:111,167` [READ] |
+| SEC-3 | Fail-open auth (anonymous investigator) | **FIXED** | `app/core/auth.py:82` `auto_error=True`, no anonymous branch (`:358-389`) [READ]; tokenless `/auth/me` → 401 [EXECUTED] |
+| SEC-4 | Auth missing on functional routes | **FIXED** | Router-level dependency (`app/main.py:129-135`); all 14 protected routes → 401 without a token; public: login, signup, `/health`, `/api/v1/health` [EXECUTED] |
+| SEC-5 | Self-registration as admin | **FIXED** | Role forced to `user` (`app/api/v1/endpoints/auth.py:106-108`) [READ]; signup with `role=admin` gets `user`, `/audit/verify` → 403 [EXECUTED] |
+| SEC-6 | Hardcoded, unrotatable JWT key | **FIXED** | Key from env only; old key rejected; ≥32 chars; refuses to start outside dev without one (`app/core/auth.py:89-145`) [READ]. Old-key and `alg=none` tokens → 401 [EXECUTED] |
+| SEC-7a | Arbitrary-path hashing / existence oracle | **N/A** | Routes removed; no route accepts a filesystem path [EXECUTED] |
+| SEC-7b | Whole upload buffered before size check | **STILL OPEN** | `await file.read()` then size check (`media_ingestion.py:136-142`); no request-body cap [READ+EXECUTED] |
+| SEC-7c | Rate limiting inert | **FIXED** | Middleware + `@limiter.limit` on login, signup, upload, analysis (`app/main.py:59-60,84`); 429s observed [EXECUTED]. Limits are per-IP, in-memory. |
+| SEC-7d | Raw exception text returned to clients | **PARTIALLY FIXED** | Generic 500 handler returns a fixed message (`app/core/exceptions.py:189-201`) [EXECUTED]. Still leaks via `error_message = str(exc)` (`app/services/orchestration/analysis_pipeline.py:251`, returned at `app/api/v1/endpoints/analysis.py:140`) and per-stage `f"{stage}: {exc}"` messages (`analysis.py:99`) [READ] |
+| SEC-7e | Unescaped HTML report | **N/A** | No HTML generation remains; reports are Markdown/JSON [READ] |
+| SEC-7f | Predictable temp PDF never deleted | **N/A** | No PDF code remains [READ] |
+| SEC-7g | Unbounded pagination | **FIXED** | Capped at 200 (`media.py:140`, `analysis.py:220`, `cases.py:62`) and 500 (`audit.py:25`); `limit=100000` → 422 [EXECUTED] |
+| SEC-7h | Error handlers never attached | **FIXED** | `app/main.py:72-75`; envelopes observed on 404/500 [EXECUTED] — see NEW-S1 |
+| — | Magic bytes not a gate; no extension allow-list | **STILL OPEN** | Falls back to client `Content-Type` (`media_ingestion.py:76-83,104`), keeps any extension (`:155`). HTML bytes sent as `image/png` named `x.html` stored as `<uuid>.html`; JPEG sent as `audio/wav` named `.exe` accepted [EXECUTED] |
+| — | Cross-user access | **FIXED** | Owner-scoped repository helpers (`app/db/repository.py:76-131,411-424`); user B gets 404 on all of user A's media, cases and analyses [EXECUTED] |
+| — | CORS | **OK** | Fixed localhost allow-list (`app/main.py:87-93`); foreign origin rejected [EXECUTED] |
+| — | Secrets in repo | **OK** | Only `.env.example` tracked; the previously committed `backend/.env` held no secrets and was removed in `341cfc5` [EXECUTED] |
 
-### Headline consequence
+### 3.2 New security / robustness issues
 
-**There is no working learned forgery/AI-generation detector in this system.** The only neural forensic detector (TruFor) is disabled and has no checkpoint. Everything that actually runs is classical signal processing with hand-tuned magic numbers and no stated calibration. Per the project spec, these must be reported as **heuristic observations, not probabilities**, and the system must not present them as proof.
-
-### Confirmed detector-layer bugs [READ]
-
-1. **Silent fusion truncation** — `manipulation_mask_generator.py:149-170` builds **7** heatmaps but supplies **6** weights; `zip()` truncates, so the colour cue is computed expensively and then **discarded**, and the gradient cue receives the weight intended for colour.
-2. **TruFor weight-key mismatch** — the weight table keys `"TruForDetector"` (`image_detection_engine.py:30`) while the detector emits `detector="TruFor"` (`trufor_detector.py:78`). If ever enabled it would silently get the 0.30 default instead of 0.70.
-3. **Structural positive bias** — `face_region_analyzer.py:279` keeps only regions scoring `>= 0.3`, then averages over *only the survivors* (`:172-176`), so the face score can never fall below 0.3 once any region is emitted.
-4. **Min-max renormalisation destroys calibration** — `manipulation_mask_generator.py:344` normalises each heatmap so its peak is always exactly 1.0, meaning a clean image and a forged image both peak at 1.0.
-5. **`CLEAN` is unreachable** — the wired set always contains the permanently-`UNAVAILABLE` `BaselineObjectDetector`, so `has_unavailable` is always true and `image_detection_engine.py:136-143` can never return `CLEAN`.
-6. **Identity swap on fallback** — YOLO/MTCNN/NeuralSpeech failures return results relabelled as the baseline detector, so downstream cannot tell "ran" from "failed and silently substituted".
-7. **Audio is dead code** — `media_detection_router.py:44-46` raises `ValueError` for anything but image/video, so any audio upload fails inside the pipeline.
-8. **Config switches ignored** — `copymove_enabled`, `manipulation_mask_enabled`, `face_region_analyzer_enabled` etc. (`config.py:74-79`) are never read; `detector_factory.py:66-75` hardcodes construction. `ai_image_model_path`, `deepfake_model_path`, `audio_model_path` are declared and never referenced.
+| ID | Severity | Issue | Evidence |
+|---|---|---|---|
+| NEW-S1 | Medium | Every 422 response carries a wrong `Content-Length`: the handler copies the headers (including `content-length`) of a smaller envelope onto a larger body. Observed header 127, body 248 bytes. Under uvicorn/h11 this is likely to abort the response [inferred]. | `app/core/exceptions.py:171-186` [READ+EXECUTED] |
+| NEW-S2 | Low/Med | Analysis runs synchronously in the request. Rate limit is 10/min/IP but each run can take minutes; signup at 5/h/IP allows multiplying the per-account daily quota. | `app/api/v1/endpoints/analysis.py:69` [READ] |
+| NEW-S3 | Low | `/health` is unauthenticated and lists detector class names. `/docs` and `/openapi.json` are probably public (FastAPI default) [UNVERIFIED]. | [EXECUTED] |
+| NEW-S4 | Info | Pipeline opens `media.file_path` without re-confining it (server-written value, so defence in depth only); `ensure_safe_path` is unused. | `analysis_pipeline.py:153`, `app/core/security.py:35` [READ] |
+| NEW-S5 | Info | 12-hour tokens, no logout or revocation list (deactivating an account does revoke). | `app/core/auth.py:376-381` [READ] |
 
 ---
 
-## 4. Forensic data model gap analysis [READ]
+## 4. Detectors
 
-Existing tables (`app/db/models.py`): `media`, `media_metadata`, `analyses`, `frames`, `detections`, `detection_regions`, `fingerprints`, `similarity_matches`, `sources`, `provenance_nodes`, `provenance_edges`, `evidence_items`, `reports`.
+### 4.1 Checkpoints on disk [EXECUTED]
 
-| Required entity | Status | Notes |
+Unchanged: the only model files are `models/face_landmarker.task` (MediaPipe) and `yolov8n.pt` (not wired). There is **no** `.pth`, `.onnx` or `.safetensors` forensic checkpoint, and no `backend/.env`.
+
+### 4.2 Capability matrix
+
+| Detector | Wired? | State | Notes |
+|---|---|---|---|
+| ForensicImageDetector (ELA/FFT/noise/EXIF) | Yes (image + video) | PARTIALLY_IMPLEMENTED | Literal `0.1` still fed into the composite on every failed sub-analysis (`app/services/detection/detectors/image/forensic_image_detector.py:155,181,235,257,280`); missing camera EXIF scores 0.40 (`:325`) |
+| ManipulationMaskGenerator | Yes | PARTIALLY_IMPLEMENTED — **flags every image tested** | See §4.3 |
+| CopyMoveDetector (SIFT + RANSAC) | Yes | IMPLEMENTED_BUT_UNVERIFIED | Confidence still `0.3 + 0.6*ratio` (`copy_move_detector.py:265`) |
+| FaceRegionAnalyzer (MediaPipe) | Yes | PARTIALLY_IMPLEMENTED | Positive bias still present: 0.3 per Hough circle (`face_region_analyzer.py:546`), keep ≥0.3 (`:327`), average of survivors (`:213-218`) |
+| BaselineFaceDetector (Haar) | Yes (image + video) | IMPLEMENTED_BUT_UNVERIFIED (heuristic) | Score 0.15 + 0.40 / + 0.25 steps (`face_detector.py:94-99`) |
+| BaselineObjectDetector | Yes | UNAVAILABLE by design | Its presence forces every analysis to PARTIAL/INCONCLUSIVE (§4.4) |
+| YOLOv8ObjectDetector | **No** | IMPLEMENTED_BUT_UNVERIFIED | Weights present; never constructed by the factory |
+| DeepLearningFaceDetector (MTCNN) | **No** | IMPLEMENTED_BUT_UNVERIFIED | |
+| TruForDetector / TruForRunner | **No** (`trufor_enabled=False`, `app/core/config.py:67`) | UNAVAILABLE | No weights; runner rejects a `state_dict` and no TruFor architecture exists in the repo (`trufor_runner.py:71-81`) |
+| **AI-generation detector (learned)** | **No** | **PLANNED** | `ai_image_model_path`, `deepfake_model_path`, `audio_model_path` (`config.py:69-71`) have no readers. The only "AI-generated" signal is an EXIF/PNG keyword match plus an FFT threshold. |
+| VideoDetectionEngine | Yes | PARTIALLY_IMPLEMENTED | Failure reporting broken (§4.4) |
+| BaselineVideoDetector | No | IMPLEMENTED_BUT_UNVERIFIED | Still keeps only `detections[0]` (`video_detector.py:89`), moot while unwired |
+| BaselineAudioAnalyzer / SpectralSpeechHeuristicDetector | No (router rejects audio) | IMPLEMENTED_BUT_UNVERIFIED, unreachable | |
+| UNet segmentation | No | PLANNED (stub) | `manipulation_mask_generator.py:423,434` |
+
+### 4.3 Previous detector bugs
+
+| # | Bug (2026-10-20) | Status | Evidence |
+|---|---|---|---|
+| 1 | Mask fusion: 7 heatmaps, 6 weights, `zip()` drops the colour cue | **STILL OPEN** | `manipulation_mask_generator.py:188-196` [READ+EXECUTED] |
+| 2 | TruFor weight-key mismatch | **FIXED** | Both use `"TruForDetector"` (`trufor_detector.py:34`, `image_detection_engine.py:85`); moot while disabled |
+| 3 | Face-region structural positive bias | **STILL OPEN** | see matrix |
+| 4 | Min-max renormalisation makes every heatmap peak at 1.0 | **STILL OPEN** — **consequence confirmed** | `manipulation_mask_generator.py:366`. On 4 unmanipulated synthetic images, `manipulation_detected=True` every time with heatmap max 1.0, and the analysis came out SUSPICIOUS [EXECUTED] |
+| 5 | Clean result unreachable | **STILL OPEN** | The always-UNAVAILABLE BaselineObjectDetector lands in `incomplete` (`image_detection_engine.py:187,328`; `analysis_pipeline.py:732-735,780`). Combined with #4, the clean outcome is never reached in practice [EXECUTED] |
+| 6 | Failed fallback relabelled as baseline | **FIXED** (unexercised) | YOLO/MTCNN now report themselves UNAVAILABLE (`object_detector.py:137`, `face_detector.py:229`) |
+| 7 | Audio unreachable | **STILL OPEN** | `media_detection_router.py:30` raises for audio, although audio uploads are accepted (`config.py:50`) [EXECUTED] |
+| 8 | Config enable switches ignored | **STILL OPEN** | Only `trufor_enabled` is read; `create_copy_move_detector` hardcodes `"SIFT"` (`detector_factory.py:67`). Ignored switches are still recorded in the run's config snapshot (`analysis_pipeline.py:63-76`), so run provenance is misleading. |
+| 9 | Unguarded top-level `import torch` | **STILL OPEN** | `trufor_runner.py:7` via `detector_factory.py:7` [EXECUTED] |
+| 10 | `NeuralSpeechDetector` contains no neural inference | **FIXED** | Renamed `SpectralSpeechHeuristicDetector` (`audio_detector.py:220-248`) |
+| 11 | Audio verdict hardcoded | **FIXED** | Now always INCONCLUSIVE (honest); still unreachable |
+
+### 4.4 New detector / pipeline bugs [EXECUTED unless noted]
+
+| ID | Severity | Bug | Evidence |
+|---|---|---|---|
+| NEW-D1 | **High** | **A video whose frame detectors fail on every frame is reported clean**: frame detectors return `failed()` rather than raising, and only exceptions are counted, so the result is NO_SIGNIFICANT_ANOMALIES_DETECTED / COMPLETED with 0 failures. | `video_detection_engine.py:186-203,342-354` |
+| NEW-D2 | **High** | Video failure counters are reset only in `__init__`; the container reuses one engine, so failures leak into later videos (a clean video showed 3 failures and came back INCONCLUSIVE). Shared mutable state is also unsafe under concurrent analyses. | `video_detection_engine.py:83-84,192,203` |
+| NEW-D3 | **High** | Every unmanipulated image tested came back SUSPICIOUS (consequence of 4.3 #4: one positive detector is enough). | `manipulation_mask_generator.py:366` |
+| NEW-D4 | Medium | Every image analysis ends PARTIAL: the SKIPPED BaselineObjectDetector is added to `stage_failures`. | `analysis_pipeline.py:389-396` |
+| NEW-D5 | Medium | Two detectors in the same signal family (ForensicImage vs ManipulationMask, both "compression") are reported as CONTRADICTORY, against the module's own family rule. Engine and pipeline also apply different decision rules (engine CONTRADICTORY vs pipeline WEAK on the same image). | `image_detection_engine.py:203` |
+| NEW-D6 | Medium | `dominant_signal` is still the argmax of raw confidence across incomparable score types. | `image_detection_engine.py:252` |
+| NEW-D7 | Medium | Video engine still blends 0.5·image + 0.3·flow + 0.2·face into one number. | `video_detection_engine.py:208-213` |
+
+### 4.5 Assessment and output contract
+
+| Requirement | Status |
+|---|---|
+| No weighted mean of unrelated detector scores (image engine) | **FIXED** (`image_detection_engine.py:205-256`); still present in the video engine (NEW-D7) |
+| Separate AI-generation and manipulation branches | **MISSING**: `LIKELY_AI_GENERATED` exists only as an enum value (`app/schemas/detection.py:133`); nothing produces it |
+| Detector status AVAILABLE / UNAVAILABLE + execution status | **FIXED** (`schemas/detection.py:196-235`) |
+| `score_semantics`, `detector_version` | **FIXED** |
+| `limitations`, `execution_time_ms` per detector | **MISSING** |
+| Video findings traceable to frame timestamps | **PARTIAL**: `frame_scores` and segments carry timestamps (`video_detection_engine.py:421-430,482`); region objects do not |
+
+---
+
+## 5. Fingerprinting, similarity, source discovery, provenance
+
+| Capability | Status | Evidence |
 |---|---|---|
-| **Case** | **MISSING** | No table. Synthesised per-request and never stored: `evidence_service.py:61` `f"AIMD-{analysis_id[:8].upper()}"` |
-| Evidence | **PARTIAL** | `media` is closest; no case linkage, no custodian, no acquisition actor, no immutability marker |
-| AnalysisRun | EXISTS | `analyses`; lacks software version, detector-set version, configuration snapshot, duration |
-| DetectorResult | EXISTS | `detections`; lacks `availability_status` separate from `execution_status`, and `score_semantics` |
-| Observation | **PARTIAL / conflated** | Split across `detection_regions` and `evidence_items` rows whose free-text `category == "OBSERVATION"` |
-| Finding | **MISSING** | `evidence_items` serves as Observation + Finding + Uncertainty simultaneously |
-| Assessment | **MISSING** as an entity | Collapsed to two columns on `analyses`: `assessment`, `overall_confidence`. No rationale, no supporting/contradicting links |
-| **AuditEvent** | **MISSING entirely** | No audit table. The PDF's "Chain of Custody" is fabricated at render time from the analysis id and the wall clock (`pdf_report.py:308-314`), and `:106` hardcodes `["Analyst:", "AIMD Automated Pipeline"]` |
-| Report | EXISTS | `reports` |
-| User/principal | **MISSING** | Accounts live in a module-level dict `DEMO_USERS_DB` (`core/auth.py:44`), lost on restart |
-
-**Migrations are a no-op** [READ]: the only migration, `alembic/versions/04e00c1a868b_initial_schema.py:21-25`, is `def upgrade(): pass`. The schema is created at runtime by `Base.metadata.create_all()` (`db/database.py:68`). `alembic upgrade head` against a fresh database therefore produces **nothing**, and there is no migration path for future changes. `alembic.ini:89` still holds the placeholder URL.
-
-No column uses a DB-level enum — every status/verdict is a bare `String` (`models.py:13` imports `Enum as SAEnum` and never uses it), so there is no value integrity at the storage layer.
+| SHA-256 | IMPLEMENTED_AND_VERIFIED | |
+| pHash / dHash | IMPLEMENTED_BUT_UNVERIFIED | `imagehash` in `app/services/similarity/similarity_engine.py` |
+| Visual embeddings (CLIP) | **PLANNED** | `open-clip-torch` is a dependency, but no embedding is ever computed |
+| FAISS / vector index | **PLANNED** | Each search loads all of the owner's fingerprints with `.all()` (`app/db/repository.py:419-424`) |
+| Duplicate detection at upload | **MISSING** | `get_media_by_sha256` (`repository.py:163`) used by tests only |
+| Reverse image search (Google Vision / TinEye) | **UNAVAILABLE** | Providers are coded (`internet_search_provider.py`) but never constructed; `SourceTracer()` / `SimilarityEngine()` default to the disabled provider (`analysis_pipeline.py:131-132`); `google_vision_api_key` / `tineye_api_key` (`config.py:117-118`) never read |
+| Source timestamps | **BROKEN** | `_run_source_tracing` persists sources without `source_timestamp` (`analysis_pipeline.py:508-517`) |
+| Provenance graph | PARTIAL | `provenance_nodes/edges` exist and appear in the evidence package |
+| C2PA Content Credentials | **PLANNED** | No code |
 
 ---
 
-## 5. Assessment & fusion: spec violations [READ/EXECUTED]
+## 6. Nebius / NVIDIA Nemotron agent
 
-Observed live during the baseline test run [EXECUTED]:
-
-```
-Pipeline complete -- status=PARTIAL assessment=SUSPICIOUS confidence=0.636
-```
-
-This single line embodies three prohibitions from the project spec:
-
-1. **A blended numeric confidence.** `image_detection_engine.py:120-130` takes a weighted mean across detectors measuring unrelated phenomena (ELA vs. face geometry vs. SIFT self-matching), with weights that are unexplained literals. The spec forbids "a numeric overall confidence by averaging unrelated detector scores" and forbids assuming detector independence.
-2. **Uncalibrated scores presented as confidence.** None of these detectors has a validation set or calibration curve in-repo, so the outputs are *model scores*, not probabilities.
-3. **`dominant_signal` ignores weights** — it is the argmax of raw confidence (`:124-126`), so a weight-0.20 detector can be reported as dominant.
-
-There is no contradiction detection, no observation-level provenance for findings, and no record of unresolved questions.
+**PLANNED. No integration exists** [EXECUTED grep outside `venv/`]: the only mention is `docs/SECURITY.md:129` ("Nebius key once added"). `openai` (needed for the OpenAI-compatible Nebius endpoint) is installed in the venv but is not in `requirements.txt`. No Nebius API key is configured.
 
 ---
 
-## 6. Mock / fabricated data in operational routes [READ]
+## 7. Data model [READ unless noted]
 
-| Route | Fabrication | Location |
+| Entity | 2026-10-20 | Now |
 |---|---|---|
-| `GET /health`, `/api/v1/health` | Six of seven model statuses are hardcoded strings never consulted from the registry (`"image_detector": "available"` …) | `main.py:94-102`, duplicated `health.py:36-44` |
-| `GET /api/v1/jobs/{id}` | `progress` is a literal — `100 if terminal else 50`. An in-flight job always claims exactly 50% | `jobs.py:52` |
-| `GET /api/v1/media/{id}` | `"status": "STORED"` — not a column, never derived | `media.py:76` |
-| `POST /api/v1/source/trace` | Fabricated SHA-256 (SEC-2), fabricated analysis row, content type guessed from suffix | `investigation.py:121-136` |
-| Evidence package | Boilerplate "No validated AI detection model configured" limitation appended **unconditionally**, even when TruFor is enabled | `evidence_service.py:266-270` |
-| Chain of custody (PDF) | Fabricated from analysis id + current clock; analyst name hardcoded | `pdf_report.py:106,308-314` |
-
-`SourceTracer` is permanently inert [READ] — `source_tracer.py:67` defaults to `DisabledSourceSearchProvider()` and is always constructed with no argument, so `/source/trace` and pipeline stage 6 can never return a result. `google_vision_api_key` / `tineye_api_key` are never read.
-
-### Dead code presenting as implemented surface [READ]
-
-`app/core/constants.py`, `app/core/security.py`, `app/core/exceptions.py` handlers, `app/schemas/media.py` (empty), `schemas/{evidence,provenance,report,similarity}.py`, `repository.get_media_by_sha256` (so **no duplicate-upload detection**), `endpoints/health.py` (never mounted), `endpoints/detection.py` (commented out), a duplicate `GET /evidence/{id}` at `investigation.py:338`.
+| Case | MISSING | **FIXED**: `CaseRecord` (`app/db/models.py:47`); `MediaRecord.case_id` RESTRICT FK (`:70`) |
+| Evidence custody | PARTIAL | **PARTIAL**: only `MediaRecord.uploaded_by` (`:73`); no custody/transfer fields |
+| AnalysisRun versions / config / duration | MISSING | **FIXED**: `software_version`, `detector_set_version`, `config_snapshot`, `duration_ms` (`:165-171`) |
+| DetectorResult availability vs execution, `score_semantics` | MISSING | **FIXED** (`:251-256,270`) |
+| Observation / Finding | MISSING / conflated | **FIXED**: `ObservationRecord`, `FindingRecord`, `FindingObservationRecord` (`:466-516`) |
+| Assessment with rationale | MISSING | **FIXED**: `AssessmentRecord` with `rule`, `rationale`, `coverage_gaps` (`:521`) |
+| AuditEvent | MISSING | **FIXED**: hash-chained `AuditEventRecord` (`:543`); `/audit/events`, `/audit/verify` |
+| User | in-memory dict | **FIXED**: `UserRecord` (`:30`) |
+| Migrations | no-op | **FIXED**: 4 revisions; `upgrade head` on an empty DB builds all 20 tables, no ORM/schema diff [EXECUTED]; runtime uses `command.upgrade` (`app/db/database.py:79-93`) |
+| DB-level enums / CHECK constraints | none | **STILL OPEN**: all status columns plain VARCHAR [EXECUTED] |
 
 ---
 
-## 7. Architecture & operations [READ]
+## 8. Mock / fabricated data and evidence integrity
 
-- **No background job mechanism at all.** Repo-wide search for `BackgroundTasks|celery|asyncio.create_task|ThreadPool|add_task` across `app/` returns zero matches. `POST /api/v1/analysis/` runs the full pipeline inline (`analysis.py:51`), pinning a thread-pool worker for minutes. `processing_timeout_seconds` is never read. A client disconnect leaves the row stuck at `PROCESSING` with no reaper.
-- **Polling exists but is near-useless** — the only way to learn the id to poll is the response of the blocking call itself.
-- **`QUEUED` is unobservable** — records are created already `PROCESSING` (`analysis_pipeline.py:88`).
-- **Status mapping hides failure** — `jobs.py:37-38` reports `PARTIAL` and `INCONCLUSIVE` both as `"COMPLETED"`.
-- **Original evidence is not preserved immutably** — no `chmod`, no read-only flag, no quarantine/working-copy split; downstream stages re-read the same path, and the stored hash is never re-verified before analysis.
-- **Two independent SHA-256 computations are never compared** — `media_ingestion.py:159` (over in-memory bytes) and `hash_generator.py:49-53` (streamed from disk).
-- **Magic-byte sniffing is not a gate** — `media_ingestion.py:76-84` falls back to the client-supplied `Content-Type`, and the two are never cross-checked. No extension allow-list (`constants.py:61-65` never imported).
-- **Unguarded top-level `import torch`** in `trufor_runner.py:7`, pulled in at container-import time by `detector_factory.py:7-9`, so a broken torch breaks all detection rather than just TruFor.
-- **Full-table-scan similarity search** on an anonymous, unthrottled route (`similarity_engine.py:135,152,170`).
+### 8.1 Previous findings
+
+| Finding | Status | Evidence |
+|---|---|---|
+| Hardcoded health model statuses | **FIXED** | Derived in `app/core/health.py:48-119` |
+| Job progress literal 100/50 | **N/A** | Jobs router removed |
+| Media `"status": "STORED"` literal | **FIXED** | Derived from the filesystem (`media.py:179-193`) |
+| Fabricated source-trace analysis row | **FIXED** | Route removed; disabled provider returns nothing |
+| Unconditional "No validated AI detection model configured" limitation | **STILL OPEN** | Appended even with TruFor enabled (`app/services/evidence/evidence_service.py:265-270`) [EXECUTED] |
+| Fabricated PDF chain of custody / analyst name | **N/A** | PDF code removed |
+| Case ID synthesised per request | **STILL OPEN** | `case_id = f"AIMD-{analysis_id[:8]}"` (`evidence_service.py:61`) ignores the real `media.case_id` |
+
+### 8.2 New integrity issues
+
+| ID | Severity | Issue | Evidence |
+|---|---|---|---|
+| NEW-E1 | **High** | **Stored report contradicts the result.** The report is generated in stage 9, *before* the assessment is computed, so the persisted report says assessment `None` and status `PROCESSING` while the analysis is SUSPICIOUS/PARTIAL. | `analysis_pipeline.py:214` vs `:218-231` [READ+EXECUTED] |
+| NEW-E2 | **High** | **Every detector is recorded as "returned INCONCLUSIVE"**: `_run_evidence` reads `detector_metadata["assessment"]`, which is always absent, so a SUSPICIOUS mask and a CLEAN detector both become UNCERTAINTY items. `_collect_limitations` has the same bug, so detector limitations never reach the report. | `analysis_pipeline.py:618`, `evidence_service.py:246` [EXECUTED] |
+| NEW-E3 | Medium | Stored hash is never re-verified before analysis: with the stored SHA-256 set to zeros, analysis still completed, and the package contained two different hashes that are never compared. | [EXECUTED] |
+| NEW-E4 | Medium | Original not preserved immutably (plain `write_bytes`, no read-only flag or working copy). | `media_ingestion.py:164` |
+| NEW-E5 | Low | `ANALYSIS_STARTED` audit event is written before the analysis ID exists. | `analysis.py:57-64` |
+| NEW-E6 | Low | Config snapshot records `max_image_dimension` / `max_*_duration_seconds`, which are enforced nowhere. | |
+
+### 8.3 Evidence package contents (`evidence_service.py:224-237`)
+
+| Spec item | Present? |
+|---|---|
+| Case and analysis identifiers | Analysis yes; **case ID fabricated** |
+| SHA-256, size, format, metadata | Yes |
+| Timestamps, software/model versions | Timestamps and `detector_version`; **no `software_version` / `config_snapshot` / `detector_set_version`** |
+| Detector statuses and score meanings | **No**: uses the deprecated `det.assessment` instead of `availability` / `execution_status` / `score_semantics` |
+| Localization overlays | Bounding boxes only; no mask overlays |
+| Sources with retrieval timestamps | `source_timestamp` field only, and it is never populated (§5) |
+| Provenance timeline | Nodes and edges |
+| C2PA | No |
+| Observations / findings / assessment rationale | **No**, although the tables exist |
+| Audit records | **No** |
+| Package-integrity hash | **No** |
+| FACT / OBSERVATION / INFERENCE / UNCERTAINTY labels | Yes; no detector output is labelled FACT [EXECUTED] |
 
 ---
 
-## 8. What is genuinely good and must be preserved
+## 9. Operations and architecture
 
-Being fair to the existing code — these are real strengths to build on, not rewrite:
+| Finding | Status | Evidence |
+|---|---|---|
+| No background jobs; pipeline runs inline in `POST /analysis` | **STILL OPEN** | `analysis.py:69` |
+| Real progress / observable QUEUED state | **STILL OPEN** | Created directly as `PROCESSING` (`analysis_pipeline.py:163`) |
+| PARTIAL/INCONCLUSIVE reported as COMPLETED | **FIXED** | PARTIAL persisted and shown in the UI [EXECUTED] |
+| Reaper for stuck `PROCESSING`; `processing_timeout_seconds` | **STILL OPEN** | No reaper; setting has no readers (`config.py:89`) |
+| Full-table-scan similarity | **STILL OPEN** (now owner-scoped) | `repository.py:419-424` |
 
-1. **`TruForRunner` is the most honest module in the tree.** It raises rather than guesses: `RuntimeError('TruFor model is not loaded')`, `ValueError("…does not contain a supported anomaly map or score")`. This is exactly the required pattern.
-2. **`TruForDetector` and `FaceRegionAnalyzer` already separate availability from execution**, deciding availability at construction via `initialization_error` and distinguishing `UNAVAILABLE` / `INCONCLUSIVE` / success at call time.
-3. **`FaceRegionAnalyzer` distinguishes "ran fine, nothing to analyse"** (`status="no_faces_detected"`, `INCONCLUSIVE`) from failure — a genuinely useful forensic distinction.
-4. **`BaselineObjectDetector` is honest by design**, returning `UNAVAILABLE` with an explanatory note rather than a fake score.
-5. **`YOLOv8ObjectDetector` refuses to overclaim** — `manipulation_detected=False,  # Object presence != manipulation`, assessment `INCONCLUSIVE`. It reports regions only. This correctly anticipates the spec's prohibition on using object detection as proof of forgery.
-6. **`AnalysisPipeline.run(media_id, db)` takes no request objects**, so it can move behind a queue with no pipeline change.
-7. **Upload storage names are UUID-derived**, not user-controlled — the strongest existing control in the upload path.
-8. **The test suite is substantial** (138 tests) and already includes `test_detector_availability_semantics.py`.
-9. **`.gitignore` correctly excludes** `.env`, `*.db`, `uploads/`, `backend/models/`.
+### 9.1 Dead code (unused in `app/`) [EXECUTED grep]
+
+- `app/core/security.py`: `sanitize_filename`, `ensure_safe_path`, `validate_file_size`, `sanitize_ffmpeg_arg`, `get_secret`
+- `app/core/exceptions.py`: `InvalidMediaError`, `MediaNotFoundError`, `AnalysisNotFoundError`, `ModelUnavailableError` (never raised)
+- `app/schemas`: `DetectionRequest`
+- `app/db/repository.py`: `get_media_by_sha256`, `create_frame`, `get_keyframes_for_media`, `create_fingerprint`, `create_similarity_match`, `create_source`, `create_evidence_item`, `get_report_for_analysis` (tests only)
+- `EvidenceService.generate_evidence_package` raises `NotImplementedError`
+
+### 9.2 Dependency and deployment drift
+
+| Issue | Evidence |
+|---|---|
+| Python 3.14.2 in venv vs 3.11.9 declared / `python:3.11-slim` in Dockerfile | [EXECUTED] |
+| Imported but not declared: `mediapipe` (clean install silently disables FaceRegionAnalyzer) | `face_region_analyzer.py:103` |
+| Declared but never imported: `piexif`, `google-cloud-vision`, `open-clip-torch`, `transformers`, `torchvision`, `aiofiles`, `reportlab`, `matplotlib`, `passlib`, `python-dotenv` | [EXECUTED] |
+| Installed but undeclared: `openai`, `exifread`, `psycopg`, `psycopg2-binary`, `torchreid` | [EXECUTED] |
+| `docker-compose.yml`: `aimd_db:/app/backend` volume masks the image's code (rebuilds keep stale code); `APP_ENV=production` without `AIMD_JWT_SECRET`, which auth refuses at startup; `aimd_reports` volume unused | [READ] |
+| `Dockerfile` copies `web/dist`, but `app/main.py` mounts no static files, so the UI is never served; `libgl1-mesa-glx` likely unavailable on current Debian slim [UNVERIFIED] | [READ] |
+| `.env.example` lists keys nothing reads (`REPORT_DIR`, `LOGS_DIR`, `MAX_*_DURATION`, `MAX_IMAGE_DIMENSION`, `PROCESSING_TIMEOUT`, `DEVICE`, `*_MODEL_PATH`, `GOOGLE_VISION_API_KEY`, `TINEYE_API_KEY`), omits `RATE_LIMIT_SIGNUP` / `DAILY_UPLOAD_LIMIT`, and suggests a psycopg2 URL with no driver declared | [READ] |
 
 ---
 
-## 9. Capability summary
+## 10. Frontend (`web/`) [READ]
+
+All requests go through `web/src/api.ts` to `/api/v1`; **no mock or simulated data**, and every endpoint it calls exists in the backend.
+
+| Spec screen | Status |
+|---|---|
+| Case management | Present ("Folders") |
+| Upload with progress / failure states | Present (`Dropzone.tsx`); states only, no real progress |
+| Detector results, assessment, rationale | Present (`Result.tsx`) |
+| Localization overlay | Bounding boxes (`Evidence.tsx`); no heatmap, no opacity control |
+| Original vs analyzed comparison | Missing |
+| Video frame timeline | Missing (`suspicious_segments` ignored) |
+| Related-source gallery | Missing |
+| Provenance timeline | Missing |
+| Report viewer / export | Missing; the report is persisted but no route or screen exposes it |
+| AI agent summary | Missing (no backend) |
+
+---
+
+## 11. Documentation accuracy [READ]
+
+- `README.md` is mostly accurate but lists a `_to_delete/` folder that does not exist.
+- `docs/ARCHITECTURE.md` overclaims: WebSocket updates, a Provenance Graph Inspector and Chain of Custody UI, "Legal-Grade" reporting, 512-d OpenCLIP embeddings, working TruFor, Google Vision/TinEye connectors, and classes named `NeuralSpeechDetector` / `VideoTemporalDetector` (the real classes are `SpectralSpeechHeuristicDetector` / `BaselineVideoDetector`). None of these exist as described.
+- Nemotron appears only as an unchecked roadmap item. No accuracy figures are claimed anywhere.
+
+---
+
+## 12. What is good and should be kept
+
+1. **Auth and tenancy are now solid**: env-only key, DB-backed users and roles, router-level auth, owner-scoped queries verified against a second user.
+2. **Real migrations and a forensic schema** that already models Case → Media → AnalysisRun → DetectorResult → Observation → Finding → Assessment, plus a hash-chained audit log.
+3. **Honest availability semantics**: `TruForRunner` raises rather than guesses; detectors separate availability from execution; `SpectralSpeechHeuristicDetector` is named for what it is; YOLO/MTCNN no longer impersonate baselines.
+4. **No blended confidence in the image engine.**
+5. **Frontend talks only to the real API.**
+6. **311 passing tests**, including availability semantics, path confinement, ownership and rate limits.
+
+---
+
+## 13. Capability summary
 
 | Capability | State |
 |---|---|
-| File upload + SHA-256 + persistence | IMPLEMENTED_AND_VERIFIED (but original not immutable) |
-| Metadata / structural extraction | IMPLEMENTED_BUT_UNVERIFIED |
-| ELA / JPEG / FFT heuristics | PARTIALLY_IMPLEMENTED (uncalibrated, mislabelled as confidence) |
-| Copy-move detection | PARTIALLY_IMPLEMENTED |
-| Face region analysis | PARTIALLY_IMPLEMENTED (real landmarks, heuristic scores, positive bias) |
-| Manipulation localisation | PARTIALLY_IMPLEMENTED (silent fusion bug; UNet stub) |
-| AI-generation detection (learned) | **UNAVAILABLE** (no checkpoint, TruFor disabled) |
-| Object detection | IMPLEMENTED_AND_VERIFIED but **unwired** |
-| Video analysis | PARTIALLY_IMPLEMENTED |
-| Audio analysis | **UNAVAILABLE** (unreachable via router; verdict hardcoded) |
-| Provenance / C2PA credentials | PLANNED |
-| Case management | **MISSING** |
-| Observations / Findings / Assessment entities | **MISSING** |
-| Audit trail | **MISSING** |
-| Evidence graph (persisted) | PARTIAL (`provenance_nodes/edges` exist, string-keyed, not FK-backed) |
-| Report generation | IMPLEMENTED_BUT_UNVERIFIED (fabricated custody section) |
-| **Nebius / NVIDIA Nemotron AI Investigator** | **PLANNED — no integration exists anywhere in the repo** (verified: no non-vendored match for `nebius`/`nemotron`) |
-| Background jobs | **MISSING** |
-| AuthN/AuthZ | PARTIALLY_IMPLEMENTED and **fail-open** |
+| Upload + SHA-256 + persistence | IMPLEMENTED_AND_VERIFIED (not immutable; hash not re-verified) |
+| Metadata extraction | IMPLEMENTED_BUT_UNVERIFIED |
+| Heuristic image forensics (ELA/FFT/noise, copy-move, face regions) | PARTIALLY_IMPLEMENTED (uncalibrated; false positives on clean images) |
+| Manipulation localization (learned, pixel-level) | **UNAVAILABLE** (no TruFor weights or architecture) |
+| AI-generation detection (learned) | **PLANNED** |
+| Video analysis | PARTIALLY_IMPLEMENTED (failure reporting broken) |
+| Audio analysis | UNAVAILABLE (router rejects audio) |
+| Fingerprints (SHA-256, pHash, dHash) | IMPLEMENTED_BUT_UNVERIFIED |
+| Embedding similarity / FAISS | PLANNED |
+| External source discovery | UNAVAILABLE (providers never wired) |
+| Provenance timeline | PARTIAL |
+| C2PA | PLANNED |
+| Case management | IMPLEMENTED_AND_VERIFIED |
+| Observation / Finding / Assessment entities | IMPLEMENTED_BUT_UNVERIFIED (not yet in the evidence package) |
+| Audit trail | IMPLEMENTED_BUT_UNVERIFIED (not in the evidence package) |
+| Report generation | PARTIALLY_IMPLEMENTED (stale assessment, mislabelled detectors, not exposed) |
+| **Nebius / Nemotron agent** | **PLANNED — no code** |
+| Background jobs | MISSING |
+| AuthN / AuthZ | IMPLEMENTED_AND_VERIFIED |
+| Frontend workflow | PARTIALLY_IMPLEMENTED (upload → result works; sources, provenance, reports, agent missing) |
 
 ---
 
-## 10. Credential status
+## 14. Prioritised remediation
 
-`backend/.env` contains only `TRUFOR_ENABLED=false` and `TRUFOR_MODEL_PATH=` (empty). Root `.env` contains only `VITE_API_BASE_URL`.
-
-**No Nebius API key is configured.** Per the project spec, the Nemotron integration will therefore be built against the documented API contract and tested with **mocked** responses, with the exact required configuration documented. No live inference will be claimed until a credential is supplied.
-
----
-
-## 11. Prioritised remediation order
-
-Rationale: a confirmed unauthenticated arbitrary file read and a fabricated hash in the evidence table outrank feature work in a forensics product.
-
-1. **P0 — SEC-1** arbitrary file read; **SEC-2** fabricated SHA-256. Stop-and-fix.
-2. **P0** Re-mount or remove the detection router (fixes all 5 baseline failures honestly).
-3. **P1 — SEC-3/4/5/6** auth fail-open, unprotected routes, role escalation, hardcoded key.
-4. **P1** Core contracts: `DetectorAvailability` / `DetectorExecutionStatus` enums; stop emitting blended `confidence`.
-5. **P2** Case / Observation / Finding / Assessment / AuditEvent tables + real migrations.
-6. **P2** Immutable original preservation + hash re-verification.
-7. **P2** Fix confirmed detector bugs (fusion truncation, weight key, positive bias, identity swap).
-8. **P3** Background jobs + genuine progress.
-9. **P3** Evidence fusion with observation-linked findings and contradiction detection.
-10. **P4** Nebius/Nemotron AI Investigator (mocked tests; documented config).
-11. **P4** New frontend against the real contract.
-12. **P5** Video/audio only where dependencies and models can be validated.
+1. **P0: make results truthful.** Fix min-max renormalisation and the 7-vs-6 fusion (NEW-D3); stop counting the by-design-UNAVAILABLE object detector as a failure/incomplete (NEW-D4, 4.3 #5); fix video failure counting and per-run reset (NEW-D1, NEW-D2); generate the report after the assessment (NEW-E1); fix evidence labelling and limitations (NEW-E2).
+2. **P0: fix the 422 `Content-Length` bug** (NEW-S1).
+3. **P1: learned detectors.** Add the TruFor architecture and weights (check the licence), and a learned AI-generation detector (AIDE or UnivFD) reported as a separate branch; add `limitations` / `execution_time_ms` to the detector contract.
+4. **P1: Nebius/Nemotron agent** with allowlisted tools; add `openai` to requirements.
+5. **P2: evidence package completeness**: real case ID, run versions/config, availability/execution/score semantics, observations/findings/assessment, audit records, integrity hash; hash re-verification and immutable originals.
+6. **P2: source discovery**: wire a reverse-search provider from config, persist retrieval timestamps, add CLIP embeddings.
+7. **P3: background jobs** with QUEUED state, real progress, timeout and reaper.
+8. **P3: upload hardening**: streaming size cap, magic-byte gate, extension allow-list; stop leaking exception text.
+9. **P3: dependency hygiene**: settle on Python 3.11/3.12, reconcile `requirements.txt`, fix `docker-compose.yml` / `Dockerfile` / `.env.example`, honour or remove ignored config switches.
+10. **P4: frontend**: report viewer/export, heatmap overlay with opacity, video timeline, sources, provenance, agent summary.
+11. **P4: docs**: correct `docs/ARCHITECTURE.md` overclaims.
 
 ---
 
-## 12. Open questions [UNVERIFIED]
+## 15. Open questions [UNVERIFIED]
 
-1. Does the shipped `face_landmarker.task` yield 468 or 478 landmarks? `FACE_REGIONS` indexes up to 477; if 468, `FaceRegionAnalyzer` silently degrades to `UNAVAILABLE` for every image.
-2. Would a real TruFor release load? `trufor_runner.py:78-81` requires a pickled `nn.Module` or ONNX export — a plain `state_dict` is rejected and **no TruFor architecture is defined in this repo**.
-3. False-positive rates for the hardcoded thresholds (0.50 / 0.55 / 0.45 / 0.35) are unknown; no labelled validation set exists in-repo.
-4. Wall-clock cost of `FaceRegionAnalyzer._compute_lbp` — a pure-Python per-pixel triple loop over 11 regions per face.
+1. Will a real TruFor release load once its architecture is vendored, and does it fit in the RTX 3050's 4 GB at useful resolutions?
+2. Do `faiss-cpu`, `c2pa-python` and the TruFor/AIDE dependencies have Python 3.14 wheels? If not, the venv must move to 3.11/3.12.
+3. False-positive rates of the remaining heuristic thresholds: there is still no labelled validation set in the repo.
+4. Does the 422 `Content-Length` mismatch actually break responses under uvicorn in practice (inferred, not observed)?
+5. Are `/docs` and `/openapi.json` publicly reachable in production configuration?

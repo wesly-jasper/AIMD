@@ -27,6 +27,10 @@ from app.db import repository as repo
 logger = logging.getLogger(__name__)
 
 
+def _plain(raw: Any) -> Any:
+    return raw.value if hasattr(raw, "value") else raw
+
+
 class EvidenceService:
 
     def build_evidence_package(
@@ -57,8 +61,12 @@ class EvidenceService:
         evidence_items = repo.get_evidence_for_analysis(db, analysis_id)
 
         # ── Case Information ──────────────────────────────────────────────────
+        # The real case, or none. This used to print "AIMD-<analysis id prefix>",
+        # a reference that matched no case record and looked like one.
+        case = repo.get_case(db, media.case_id) if media.case_id else None
         case_information = {
-            "case_id": f"AIMD-{analysis_id[:8].upper()}",
+            "case_id": case.id if case else None,
+            "case_title": case.title if case else None,
             "analysis_id": analysis_id,
             "media_id": analysis.media_id,
             "analysis_status": analysis.status,
@@ -108,11 +116,9 @@ class EvidenceService:
         # ── Detection Evidence ────────────────────────────────────────────────
         detection_evidence = []
         for det in detections:
-            assessment = det.assessment
+            assessment = _plain(det.assessment)
             # Determine evidence category based on assessment
-            if assessment == "SUSPICIOUS":
-                category = "OBSERVATION"
-            elif assessment in ("INCONCLUSIVE", "UNAVAILABLE"):
+            if assessment in ("INCONCLUSIVE", "UNAVAILABLE"):
                 category = "UNCERTAINTY"
             else:
                 category = "OBSERVATION"
@@ -240,13 +246,19 @@ class EvidenceService:
         """Collect and surface all uncertainty/limitation statements."""
         limitations = []
 
-        # Detection limitations
+        # Detection limitations. Read from the detection's own columns: detectors
+        # no longer write ``assessment`` into metadata, so keying on
+        # ``meta["assessment"]`` silently dropped every detector's limitation.
         for det in detections:
             meta = det.detector_metadata or {}
-            if meta.get("assessment") in ("UNAVAILABLE", "INCONCLUSIVE"):
+            if _plain(det.assessment) in ("UNAVAILABLE", "INCONCLUSIVE"):
                 for lim in meta.get("limitations", []):
                     limitations.append(lim)
-                if note := meta.get("note"):
+                if det.status_reason:
+                    limitations.append(
+                        f"UNCERTAINTY: {det.detector}: {det.status_reason}"
+                    )
+                elif note := meta.get("note"):
                     limitations.append(note)
 
         # Source limitations
@@ -262,12 +274,22 @@ class EvidenceService:
                 "UNCERTAINTY: Analysis completed only partially. Some pipeline stages failed."
             )
 
-        # Baseline detector warning
-        limitations.append(
-            "UNCERTAINTY: Image forensic analysis uses heuristic methods (ELA, FFT, noise). "
-            "No validated AI detection model (e.g. TruFor) is configured. "
-            "Heuristic signals are forensic indicators, not proof of manipulation."
+        # Learned-model warning, only when no learned model actually ran. It used
+        # to be appended unconditionally, so a report said TruFor was not
+        # configured even on runs where TruFor produced the result.
+        learned_ran = any(
+            det.detector == "TruForDetector"
+            and _plain(det.availability) == "AVAILABLE"
+            and _plain(det.execution_status) in ("COMPLETED", "INCONCLUSIVE")
+            for det in detections
         )
+        if not learned_ran:
+            limitations.append(
+                "UNCERTAINTY: No learned forgery-localisation model (TruFor) "
+                "produced observations for this analysis. Image forensic analysis "
+                "relied on heuristic methods (ELA, FFT, noise), which are forensic "
+                "indicators, not proof of manipulation."
+            )
 
         return list(dict.fromkeys(limitations))  # Deduplicate, preserve order
 

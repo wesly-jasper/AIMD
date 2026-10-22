@@ -160,6 +160,19 @@ def test_validation_error_names_the_field_without_echoing_the_value():
     assert all(set(field) == {"location", "message", "type"} for field in fields)
 
 
+def test_validation_error_content_length_matches_the_body():
+    """
+    Regression: the 422 copied another response's headers, content-length
+    included, so it declared fewer bytes than it sent. The test client reads the
+    whole body regardless; a real server aborts the response mid-write.
+    """
+    response = client.get("/__test__/validated", params={"count": "x"})
+
+    assert response.status_code == 422
+    assert int(response.headers["content-length"]) == len(response.content)
+    assert response.headers[REQUEST_ID_HEADER] == response.json()["request_id"]
+
+
 def test_every_response_carries_a_correlation_header():
     ok = client.get("/health")
     assert ok.headers[REQUEST_ID_HEADER]

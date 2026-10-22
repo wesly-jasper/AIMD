@@ -79,9 +79,18 @@ class VideoDetectionEngine:
         self._spatial_tracker = VideoSpatialTemporalTracker()
         self._temporal_anomaly_detector = TemporalAnomalyDetector()
         self.detectors = detectors or [self._image_detector, self._face_detector]
-        # Failure counters for UNCERTAINTY evidence
+        # Per-video counters for UNCERTAINTY evidence; reset by _analyse_frames.
+        self._reset_counters()
+
+    def _reset_counters(self) -> None:
+        # The engine is a long-lived singleton. These counters used to be set
+        # once in __init__ and never reset, so one bad video made every later
+        # video report failures it never had.
         self._image_detector_failures = 0
         self._face_detector_failures = 0
+        # Frames on which a detector ran but could not support a determination.
+        self._image_detector_undetermined = 0
+        self._face_detector_undetermined = 0
 
     def detect(self, file_path: Path | str) -> dict[str, Any]:
         file_path = Path(file_path)
@@ -154,8 +163,9 @@ class VideoDetectionEngine:
         frame_index = 0
         analysed = 0
 
-        # Reset spatial tracker for new video
+        # Reset per-video state
         self._spatial_tracker.reset()
+        self._reset_counters()
 
         try:
             with tempfile.TemporaryDirectory() as tmpdir:
@@ -184,9 +194,16 @@ class VideoDetectionEngine:
                         regions: list[DetectionRegion] = []
                         try:
                             img_result: DetectionResult = self._image_detector.detect(tmp_path)
-                            image_confidence = float(img_result.confidence)
-                            image_assessment = "SUSPICIOUS" if img_result.manipulation_detected else "CLEAN"
-                            regions = img_result.regions
+                            # A detector that returns FAILED/UNAVAILABLE instead of
+                            # raising used to be read as a CLEAN frame.
+                            if not img_result.produced_observations:
+                                self._image_detector_failures += 1
+                            else:
+                                if img_result.execution_status is DetectorExecutionStatus.INCONCLUSIVE:
+                                    self._image_detector_undetermined += 1
+                                image_confidence = float(img_result.confidence)
+                                image_assessment = img_result.assessment.value
+                                regions = img_result.regions
                         except Exception as exc:
                             logger.warning("ForensicImageDetector failed on frame %d: %s", frame_index, exc, exc_info=True)
                             self._image_detector_failures += 1
@@ -196,8 +213,13 @@ class VideoDetectionEngine:
                         face_regions: list[DetectionRegion] = []
                         try:
                             face_result: DetectionResult = self._face_detector.detect(tmp_path)
-                            face_score = float(face_result.confidence)
-                            face_regions = face_result.regions
+                            if not face_result.produced_observations:
+                                self._face_detector_failures += 1
+                            else:
+                                if face_result.execution_status is DetectorExecutionStatus.INCONCLUSIVE:
+                                    self._face_detector_undetermined += 1
+                                face_score = float(face_result.confidence)
+                                face_regions = face_result.regions
                         except Exception as exc:
                             logger.warning("FaceDetector failed on frame %d: %s", frame_index, exc, exc_info=True)
                             self._face_detector_failures += 1
@@ -345,6 +367,11 @@ class VideoDetectionEngine:
             # Some frames were anomalous, just not a material proportion of them.
             # Not a negative result.
             assessment = "INCONCLUSIVE"
+        elif self._image_detector_undetermined or self._face_detector_undetermined:
+            # A frame detector ran but could not support a determination (the
+            # forensic heuristic is uncalibrated). Its silence is not "no
+            # anomaly found".
+            assessment = "INCONCLUSIVE"
         else:
             # Full coverage, every frame analysed by both frame detectors, and no
             # frame exceeded threshold. This is the strongest negative statement
@@ -433,6 +460,8 @@ class VideoDetectionEngine:
                 "detector_failures": {
                     "image_detector_failures": self._image_detector_failures,
                     "face_detector_failures": self._face_detector_failures,
+                    "image_detector_undetermined": self._image_detector_undetermined,
+                    "face_detector_undetermined": self._face_detector_undetermined,
                     "total_frames_analyzed": len(frame_results)
                 },
                 "failure_messages": [msg for msg in [image_failure_msg, face_failure_msg] if msg is not None],

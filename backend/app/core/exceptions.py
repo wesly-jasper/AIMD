@@ -168,9 +168,6 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
         for err in exc.errors()
     ]
     logger.warning("Validation failed on %s: %d field error(s)", request.url.path, len(fields))
-    response = _envelope(
-        422, "VALIDATION_ERROR", "Request validation failed", request_id
-    )
     body = {
         "success": False,
         "data": None,
@@ -181,8 +178,10 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
         },
         "request_id": request_id,
     }
+    # Only the request ID header. Copying another response's headers carried its
+    # content-length, which no longer matched this (larger) body.
     return JSONResponse(
-        status_code=422, content=body, headers=dict(response.headers)
+        status_code=422, content=body, headers={REQUEST_ID_HEADER: request_id}
     )
 
 

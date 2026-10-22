@@ -117,6 +117,13 @@ class Settings(BaseSettings):
     google_vision_api_key: Optional[str] = None
     tineye_api_key: Optional[str] = None
 
+    # ── NVIDIA Nemotron via Nebius Token Factory ──────────────────────────────
+    # OpenAI-compatible endpoint. With no key the investigation agent reports
+    # UNAVAILABLE; nothing else depends on it.
+    nebius_api_key: Optional[str] = None
+    nebius_base_url: str = "https://api.tokenfactory.nebius.com/v1/"
+    nemotron_model: str = "nvidia/nemotron-3-super-120b-a12b"
+
     model_config = SettingsConfigDict(
         env_file=".env",
         extra="ignore",

@@ -2,7 +2,7 @@
 
 BACKEND_DIR=backend
 WEB_DIR=web
-PY=../venv/Scripts/python.exe
+PY=../.venv/Scripts/python.exe
 
 backend-install:
 	cd $(BACKEND_DIR) && $(PY) -m pip install -r requirements.txt

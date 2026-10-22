@@ -1,71 +1,65 @@
-﻿# AIMD - AI Media Detection & Digital Forensics Platform
-# Full dependency manifest for all implementation phases
-# Python 3.11.9 | Windows compatible
+﻿# AIMD Sentinel - backend dependencies
+# Target runtime: Python 3.11 (local venv and the Docker image use the same version)
+#
+# torch/torchvision are NOT pinned to a build here. Install the build for your
+# hardware first, then this file:
+#   CUDA 12.6: pip install torch torchvision --index-url https://download.pytorch.org/whl/cu126
+#   CPU only:  pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+# See scripts/setup_env.ps1.
+
+# --- Web framework -----------------------------------------------------------
+# Capped: later releases keep included routers wrapped in ``_IncludedRouter``
+# instead of flattening them into ``app.routes``. slowapi then cannot match a
+# request to its route, so the default rate limit silently stops applying.
+fastapi>=0.115,<0.136
 starlette>=0.49.1
-# CORE WEB FRAMEWORK
-fastapi>=0.110.0
-uvicorn[standard]>=0.29.0
-pydantic>=2.6.0
-pydantic-settings>=2.2.0
+uvicorn[standard]>=0.30
+pydantic>=2.7,<3
+pydantic-settings>=2.3,<3
 python-multipart>=0.0.9
-aiofiles>=23.2.1
 
-# DATABASE
-sqlalchemy>=2.0.0
-alembic>=1.13.0
+# --- Database ----------------------------------------------------------------
+sqlalchemy>=2.0,<2.1
+alembic>=1.13
 
-# IMAGE PROCESSING & COMPUTER VISION
-opencv-python-headless>=4.9.0,<5.0.0
-pillow>=10.2.0
-numpy>=1.26.0
+# --- Image / video processing ------------------------------------------------
+opencv-python-headless>=4.9,<5
+pillow>=10.2
+numpy>=1.26,<3
 imagehash>=4.3.1
-
-# EXIF METADATA
 piexif>=1.1.3
 
-# AUDIO ANALYSIS
-librosa>=0.10.0
-soundfile>=0.12.1
+# --- Audio (metadata + extraction only; no spoof model is integrated) --------
+librosa>=0.10
+soundfile>=0.12
 
-# DEEP LEARNING RUNTIME (Phase 1-5)
-torch>=2.0.0
-torchvision>=0.15.0
-onnxruntime>=1.17.0
+# --- Models ------------------------------------------------------------------
+torch>=2.3
+torchvision>=0.18
+onnxruntime>=1.17
+open-clip-torch>=2.24        # CLIP ViT-L/14: UnivFD backbone + similarity embeddings
+facenet-pytorch==2.5.3       # MTCNN face detection (2.6 pins torch<2.3 and numpy<2)
+mediapipe>=0.10.14,<0.11     # face landmarks
+ultralytics>=8.1             # YOLOv8 baseline object detector
 
-# PHASE 2: SEMANTIC IMAGE EMBEDDINGS (OpenCLIP)
-open-clip-torch>=2.24.0
+# --- Provenance --------------------------------------------------------------
+c2pa-python>=0.6             # C2PA Content Credentials verification
 
-# PHASE 3: ADVANCED FACE DETECTION (MTCNN)
-facenet-pytorch>=2.5.3
+# --- NVIDIA Nemotron via Nebius Token Factory (OpenAI-compatible API) --------
+openai>=1.40
 
-# PHASE 4: SYNTHETIC SPEECH DETECTION (Wav2Vec2)
-transformers>=4.36.0
-
-# PHASE 5: OBJECT DETECTION (YOLOv8)
-ultralytics>=8.1.0
-
-# PHASE 6: EXTERNAL SOURCE DISCOVERY
-google-cloud-vision>=3.7.0
-
-# PHASE 9: AUTHENTICATION (JWT)
-python-jose[cryptography]>=3.3.0
-passlib[bcrypt]>=1.7.4
-bcrypt>=4.0.0
-
-# PHASE 10: SECURITY HARDENING
+# --- Auth & security ---------------------------------------------------------
+python-jose[cryptography]>=3.3
+bcrypt>=4.0
 slowapi>=0.1.9
 
-# HTTP CLIENT
-httpx>=0.27.0
-requests>=2.31.0
+# --- HTTP --------------------------------------------------------------------
+httpx>=0.27
+requests>=2.31
 
-# TESTING
-pytest>=8.1.0
-pytest-asyncio>=0.23.0
+# --- Utilities ---------------------------------------------------------------
+python-dotenv>=1.0
 
-# REPORTING
-reportlab>=4.0.0
-matplotlib>=3.8.0
-
-# UTILITIES
-python-dotenv>=1.0.0
+# --- Testing -----------------------------------------------------------------
+pytest>=8.1
+pytest-asyncio>=0.23

@@ -41,7 +41,7 @@ class ManipulationMaskGenerator(BaseDetector):
         scales: List[int] = None,  # Analysis scales (downsample factors)
         quality_factors: List[int] = None,  # ELA quality factors
         gaussian_sigma: float = 1.5,
-        heatmap_threshold: float = 0.3,
+        region_z_threshold: float = 3.0,  # Fused robust z-score marking an outlier pixel
         min_region_area: int = 64,  # Minimum region area in pixels
         enable_unet: bool = False,  # Enable deep learning segmentation
         unet_model_path: Optional[str] = None,
@@ -49,7 +49,7 @@ class ManipulationMaskGenerator(BaseDetector):
         self.scales = scales or [1, 2, 4, 8]
         self.quality_factors = quality_factors or [75, 85, 95]
         self.gaussian_sigma = gaussian_sigma
-        self.heatmap_threshold = heatmap_threshold
+        self.region_z_threshold = region_z_threshold
         self.min_region_area = min_region_area
         self.enable_unet = enable_unet
         self.unet_model_path = unet_model_path
@@ -83,45 +83,42 @@ class ManipulationMaskGenerator(BaseDetector):
             # Extract regions from heatmap
             regions = self._extract_regions_from_heatmap(heatmap, (w, h))
 
-            # Compute overall confidence
-            max_conf = max((r.confidence for r in regions), default=0.0)
-            manipulation_detected = max_conf >= 0.45 and len(regions) > 0
-
             # If UNet enabled and model available, refine with deep learning
             if self.enable_unet and self._unet_model is not None:
                 regions = self._refine_with_unet(img, heatmap, regions)
 
-            return DetectionResult(
-                detector=self.detector_id,
-                detector_version=self.version,
+            # AVAILABLE + INCONCLUSIVE, never a determination. The heatmap is a
+            # hand-weighted fusion of classical cues that has not been calibrated
+            # against any labelled corpus, so there is no threshold at which "an
+            # outlier region exists" can honestly be reported as "manipulation
+            # detected". Every real photograph has regions that are statistical
+            # outliers in some cue (sky vs. foliage, in-focus vs. bokeh). The
+            # regions are kept so an examiner can look at them.
+            return self.inconclusive(
+                "Uncalibrated heuristic: regions are statistical outliers for "
+                "examiner review, not a determination of manipulation.",
                 media_type="image",
-                manipulation_detected=manipulation_detected,
-                confidence=round(max_conf, 4),
-                manipulation_type=self.manipulation_type,
-                availability=DetectorAvailability.AVAILABLE,
-                execution_status=DetectorExecutionStatus.COMPLETED,
-                # A fused multi-scale ELA/FFT/noise heatmap maximum. Ordinal
-                # severity only -- it is not a probability of manipulation.
-                score_semantics=ScoreSemantics.HEURISTIC_SEVERITY,
                 regions=regions,
                 metadata={
                     "status": "active_mask_generation",
                     "scales_used": self.scales,
                     "quality_factors": self.quality_factors,
                     "heatmap_shape": list(heatmap.shape),
+                    # Units are robust z-scores (median/MAD), not probabilities.
+                    "heatmap_units": "robust_z",
                     "heatmap_stats": {
                         "min": float(heatmap.min()),
                         "max": float(heatmap.max()),
                         "mean": float(heatmap.mean()),
                         "std": float(heatmap.std()),
                     },
+                    "region_z_threshold": self.region_z_threshold,
                     "regions_found": len(regions),
                     "unet_refinement": (
                         "unavailable" if self.enable_unet and self._unet_model is None
                         else "configured" if self.enable_unet
                         else "disabled"
                     ),
-                    "note": "OBSERVATION: Pixel-level manipulation heatmap generated. Regions indicate suspicious areas.",
                 },
             )
 
@@ -188,14 +185,39 @@ class ManipulationMaskGenerator(BaseDetector):
         color_heatmap = self._compute_color_heatmap(img)
         heatmaps.append(color_heatmap)
 
-        # Fuse with adaptive weights
-        weights = [1.0, 1.0, 1.0, 0.8, 1.0, 0.7]  # Adjust based on importance
+        # One weight per cue: 3 ELA quality factors, FFT, noise, gradient, colour.
+        # There were six weights for these seven maps and ``zip`` silently
+        # dropped the colour cue; the strict zip makes that a crash instead.
+        weights = [1.0] * len(self.quality_factors) + [0.8, 1.0, 0.7, 0.7]
         fused = np.zeros_like(heatmaps[0], dtype=np.float32)
-        for hm, w in zip(heatmaps, weights):
-            fused += hm * w
+        for hm, w in zip(heatmaps, weights, strict=True):
+            fused += self._robust_z(hm) * w
         fused /= sum(weights)
 
         return fused
+
+    @staticmethod
+    def _robust_z(cue: np.ndarray) -> np.ndarray:
+        """
+        Express a cue map as robust z-scores against the image's own median.
+
+        Each cue used to be min-max stretched to [0, 1]. That guarantees some
+        pixels reach 1.0 in every image, so a fixed threshold always found
+        "suspicious" regions, even in an untouched photograph. Median/MAD keeps
+        the scale of the image's own variation: a uniform map stays near zero and
+        only genuine outliers score high.
+        """
+        cue = cue.astype(np.float32)
+        median = float(np.median(cue))
+        mad = float(np.median(np.abs(cue - median)))
+        scale = 1.4826 * mad
+        if scale < 1e-6:
+            # Degenerate (near-constant) cue: fall back to the standard deviation
+            # so a few outliers in an otherwise flat map are still visible.
+            scale = float(cue.std())
+        if scale < 1e-6:
+            return np.zeros_like(cue)
+        return (cue - median) / scale
 
     def _compute_ela(self, img: np.ndarray, quality: int) -> np.ndarray:
         """Compute Error Level Analysis at given quality factor."""
@@ -258,14 +280,27 @@ class ManipulationMaskGenerator(BaseDetector):
                 heatmap[y:y+win_size, x:x+win_size] += anomaly_score
                 count[y:y+win_size, x:x+win_size] += 1
 
-        # Normalize by count
-        count[count == 0] = 1
-        heatmap /= count
+        return self._average_covered(heatmap, count)
 
-        # Normalize to [0, 1]
-        heatmap = (heatmap - heatmap.min()) / (heatmap.max() - heatmap.min() + 1e-10)
+    @staticmethod
+    def _average_covered(total: np.ndarray, count: np.ndarray) -> np.ndarray:
+        """
+        Average overlapping window scores and neutralise uncovered pixels.
 
-        return heatmap
+        Sliding windows do not reach the right/bottom strip when the image size
+        is not a multiple of the stride, and at coarse scales a window may not fit
+        at all. Those pixels were left at a fixed value (0, or 1.0 after the
+        gradient cue's inversion) and showed up as large "anomalous" bands along
+        the border of every image. They are measured by nothing, so they get the
+        median of the covered pixels: no evidence either way.
+        """
+        covered = count > 0
+        if not covered.any():
+            return np.zeros_like(total, dtype=np.float32)
+        out = np.zeros_like(total, dtype=np.float32)
+        out[covered] = total[covered] / count[covered]
+        out[~covered] = float(np.median(out[covered]))
+        return out
 
     def _compute_noise_heatmap(self, img: np.ndarray) -> np.ndarray:
         """Compute noise residual heatmap (PRNU-like)."""
@@ -299,9 +334,10 @@ class ManipulationMaskGenerator(BaseDetector):
         mag = np.sqrt(gx**2 + gy**2)
         angle = np.arctan2(gy, gx)
 
-        # Local gradient coherence
+        # Local gradient incoherence (1 - coherence = anomaly)
         win_size = 16
-        coherence = np.zeros_like(mag)
+        total = np.zeros_like(mag)
+        count = np.zeros_like(mag)
 
         for y in range(0, h - win_size + 1, win_size // 2):
             for x in range(0, w - win_size + 1, win_size // 2):
@@ -310,14 +346,11 @@ class ManipulationMaskGenerator(BaseDetector):
                 mean_cos = np.mean(np.cos(2 * patch_angle))
                 mean_sin = np.mean(np.sin(2 * patch_angle))
                 coh = np.sqrt(mean_cos**2 + mean_sin**2)
-                coherence[y:y+win_size, x:x+win_size] = coh
+                total[y:y+win_size, x:x+win_size] += 1.0 - coh
+                count[y:y+win_size, x:x+win_size] += 1
 
-        # Incoherence = anomaly
-        heatmap = 1.0 - coherence
-        heatmap = cv2.GaussianBlur(heatmap, (0, 0), self.gaussian_sigma)
-        heatmap = (heatmap - heatmap.min()) / (heatmap.max() - heatmap.min() + 1e-10)
-
-        return heatmap
+        heatmap = self._average_covered(total, count)
+        return cv2.GaussianBlur(heatmap, (0, 0), self.gaussian_sigma)
 
     def _compute_color_heatmap(self, img: np.ndarray) -> np.ndarray:
         """Compute color space inconsistency heatmap."""
@@ -329,11 +362,11 @@ class ManipulationMaskGenerator(BaseDetector):
         # Check for unnatural color transitions
         # Compute local statistics in LAB space
         win_size = 32
-        heatmap = np.zeros_like(l)
+        total = np.zeros_like(l)
+        count = np.zeros_like(l)
 
         for y in range(0, h - win_size + 1, win_size // 2):
             for x in range(0, w - win_size + 1, win_size // 2):
-                patch_l = l[y:y+win_size, x:x+win_size]
                 patch_a = a[y:y+win_size, x:x+win_size]
                 patch_b = b[y:y+win_size, x:x+win_size]
 
@@ -343,13 +376,13 @@ class ManipulationMaskGenerator(BaseDetector):
                 # Low chroma variation may indicate manipulation
                 anomaly = 1.0 / (1.0 + std_a + std_b)
 
-                heatmap[y:y+win_size, x:x+win_size] += anomaly
+                # Averaged, not summed: summing made interior pixels (covered by
+                # four windows) score up to 4x the border ones.
+                total[y:y+win_size, x:x+win_size] += anomaly
+                count[y:y+win_size, x:x+win_size] += 1
 
-        # Normalize
-        heatmap = cv2.GaussianBlur(heatmap, (0, 0), self.gaussian_sigma)
-        heatmap = (heatmap - heatmap.min()) / (heatmap.max() - heatmap.min() + 1e-10)
-
-        return heatmap
+        heatmap = self._average_covered(total, count)
+        return cv2.GaussianBlur(heatmap, (0, 0), self.gaussian_sigma)
 
     def _postprocess_heatmap(self, heatmap: np.ndarray, target_size: Tuple[int, int]) -> np.ndarray:
         """Post-process heatmap: resize, smooth, threshold."""
@@ -359,22 +392,18 @@ class ManipulationMaskGenerator(BaseDetector):
         if heatmap.shape[1] != w or heatmap.shape[0] != h:
             heatmap = cv2.resize(heatmap, (w, h), interpolation=cv2.INTER_CUBIC)
 
-        # Gaussian smoothing
-        heatmap = cv2.GaussianBlur(heatmap, (0, 0), self.gaussian_sigma)
-
-        # Normalize to [0, 1]
-        heatmap = (heatmap - heatmap.min()) / (heatmap.max() - heatmap.min() + 1e-10)
-
-        return heatmap
+        # Gaussian smoothing. No min-max stretch: the map stays in robust z units
+        # so the region threshold means the same thing on every image.
+        return cv2.GaussianBlur(heatmap, (0, 0), self.gaussian_sigma)
 
     def _extract_regions_from_heatmap(
         self, heatmap: np.ndarray, img_size: Tuple[int, int]
     ) -> List[DetectionRegion]:
-        """Extract connected regions from heatmap above threshold."""
+        """Extract connected regions whose fused robust z-score is an outlier."""
         w, h = img_size
 
         # Threshold
-        binary = (heatmap > self.heatmap_threshold).astype(np.uint8)
+        binary = (heatmap > self.region_z_threshold).astype(np.uint8)
 
         # Morphological operations to clean up
         kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
@@ -392,22 +421,21 @@ class ManipulationMaskGenerator(BaseDetector):
 
             x, y, w_rect, h_rect = cv2.boundingRect(cnt)
 
-            # Compute mean confidence in region
             mask = np.zeros(heatmap.shape, dtype=np.uint8)
             cv2.drawContours(mask, [cnt], -1, 255, -1)
-            region_confidence = float(np.mean(heatmap[mask > 0]))
+            mean_z = float(np.mean(heatmap[mask > 0]))
 
-            # Only keep high-confidence regions
-            if region_confidence < 0.35:
-                continue
+            # Region ``confidence`` is an ordinal outlier severity for sorting and
+            # display, squashed into [0, 1]. It is not a probability.
+            severity = float(np.clip(1.0 - np.exp(-max(mean_z, 0.0) / 6.0), 0.0, 1.0))
 
             regions.append(DetectionRegion(
                 type="manipulation_mask",
-                confidence=round(region_confidence, 3),
+                confidence=round(severity, 3),
                 bbox=[float(x), float(y), float(w_rect), float(h_rect)],
                 extra={
                     "area": float(area),
-                    "mean_heatmap_value": round(region_confidence, 3),
+                    "mean_robust_z": round(mean_z, 3),
                     "contour_points": len(cnt),
                 }
             ))

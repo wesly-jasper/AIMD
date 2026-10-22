@@ -44,7 +44,8 @@ class ReportGenerator:
             "",
             f"**Generated:** {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}  ",
             f"**Platform:** AIMD (AI Media Detection & Digital Forensics Platform)  ",
-            f"**Case Reference:** {case.get('case_id', 'N/A')}",
+            f"**Case Reference:** {case.get('case_id') or 'N/A'}"
+            + (f" ({case['case_title']})" if case.get("case_title") else ""),
             "",
             "---",
             "",

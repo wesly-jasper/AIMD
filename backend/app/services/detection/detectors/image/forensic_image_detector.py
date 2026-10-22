@@ -81,39 +81,55 @@ class ForensicImageDetector(BaseDetector):
             )
             composite_score = float(np.clip(composite_score, 0.0, 0.99))
 
-            manipulation_detected = composite_score >= 0.50
-
-            # Determine dominant manipulation type
-            if fft_score > 0.65 or meta_indicators.get("is_ai_generated"):
-                manipulation_type = "ai_generated_synthetic"
-            elif ela_score > 0.60 or noise_score > 0.60:
-                manipulation_type = "splice_or_copy_move"
-            else:
-                manipulation_type = "image_manipulation"
-
             # Combine localized suspicious regions
             regions = suspicious_ela_regions + noise_regions
 
-            return DetectionResult(
-                detector=self.detector_id,
-                detector_version=self.version,
+            metadata = {
+                "status": "active_forensic_engine",
+                "composite_severity": round(composite_score, 4),
+                "ela_score": round(ela_score, 4),
+                "fft_spectral_score": round(fft_score, 4),
+                "noise_inconsistency_score": round(noise_score, 4),
+                "metadata_score": round(meta_score, 4),
+                "spectral_metrics": spectral_metrics,
+                "metadata_indicators": meta_indicators
+            }
+
+            # The one observation here that does not depend on uncalibrated
+            # thresholds: the file's own metadata names an image generator.
+            # That is a declaration by whatever wrote the file, and it is
+            # reported as such.
+            if meta_indicators.get("is_ai_generated"):
+                return DetectionResult(
+                    detector=self.detector_id,
+                    detector_version=self.version,
+                    media_type="image",
+                    manipulation_detected=True,
+                    confidence=round(meta_score, 4),
+                    manipulation_type="ai_generated_synthetic",
+                    availability=DetectorAvailability.AVAILABLE,
+                    execution_status=DetectorExecutionStatus.COMPLETED,
+                    score_semantics=ScoreSemantics.HEURISTIC_SEVERITY,
+                    status_reason=(
+                        "File metadata names an image generator "
+                        f"({meta_indicators.get('software')})."
+                    ),
+                    regions=regions[:10],
+                    metadata=metadata,
+                )
+
+            # Everything else is INCONCLUSIVE. The composite used to be compared
+            # with 0.50 and reported as "manipulation detected", and every
+            # ordinary camera JPEG tested scored 0.57-0.69: ELA, FFT and noise
+            # residual all respond to normal JPEG compression, and the thresholds
+            # were never fitted to labelled data. The scores are kept for an
+            # examiner; they do not support a determination either way.
+            return self.inconclusive(
+                "Uncalibrated heuristic: ELA/FFT/noise scores are kept for "
+                "examiner review and do not support a determination.",
                 media_type="image",
-                manipulation_detected=manipulation_detected,
-                confidence=round(composite_score, 4),
-                manipulation_type=manipulation_type,
-                availability=DetectorAvailability.AVAILABLE,
-                execution_status=DetectorExecutionStatus.COMPLETED,
-                score_semantics=ScoreSemantics.HEURISTIC_SEVERITY,
-                regions=regions[:10], # Top 10 most suspicious regions
-                metadata={
-                    "status": "active_forensic_engine",
-                    "ela_score": round(ela_score, 4),
-                    "fft_spectral_score": round(fft_score, 4),
-                    "noise_inconsistency_score": round(noise_score, 4),
-                    "metadata_score": round(meta_score, 4),
-                    "spectral_metrics": spectral_metrics,
-                    "metadata_indicators": meta_indicators
-                }
+                regions=regions[:10],  # Top 10 most suspicious regions
+                metadata=metadata,
             )
 
         except Exception as e:

@@ -33,7 +33,10 @@ from app.core.config import settings
 from app.db import repository as repo
 from app.db.models import AnalysisRecord
 from app.schemas.detection import Assessment, EvidenceStrength
-from app.services.detection.engine.image_detection_engine import ImageDetectionEngine
+from app.services.detection.engine.image_detection_engine import (
+    _SIGNAL_FAMILY,
+    ImageDetectionEngine,
+)
 from app.services.preprocessing.metadata_extractor import MetadataExtractor
 from app.services.preprocessing.frame_extractor import FrameExtractor
 from app.services.preprocessing.keyframe_selector import KeyframeSelector
@@ -209,18 +212,27 @@ class AnalysisPipeline:
             logger.info("[%s] Stage 8: Evidence generation", analysis_id)
             self._run_evidence(analysis_id, db, stage_failures)
 
+            # ── Assessment, before the report ─────────────────────────────────
+            # The report reads the analysis-level assessment. It used to be
+            # generated first, while that assessment was still unset, so every
+            # stored report said INCONCLUSIVE whatever the analysis concluded.
+            assessment, evidence_strength = self._compute_final_assessment(
+                analysis_id, db
+            )
+            repo.update_analysis_status(
+                db, analysis_id,
+                status="PROCESSING",
+                assessment=assessment,
+                evidence_strength=evidence_strength,
+            )
+            self._run_forensic_record(analysis_id, db, stage_failures)
+
             # ── Stage 9: Report ───────────────────────────────────────────────
             logger.info("[%s] Stage 9: Report generation", analysis_id)
             self._run_report(analysis_id, db, stage_failures)
 
             # ── Finalize ──────────────────────────────────────────────────────
             final_status = "PARTIAL" if stage_failures else "COMPLETED"
-            assessment, evidence_strength = self._compute_final_assessment(
-                analysis_id, db
-            )
-            self._run_forensic_record(analysis_id, db, stage_failures)
-            if stage_failures:
-                final_status = "PARTIAL"
             self._finish_run(analysis_id, db, started)
 
             repo.update_analysis_status(
@@ -383,13 +395,21 @@ class AnalysisPipeline:
                 )
                 status_reason = det_data.get("status_reason") or meta.get("reason")
 
-                # A stage failure is recorded whenever the detector did not
-                # produce usable observations. Both UNAVAILABLE (no capability)
-                # and FAILED (broken capability) qualify, and they are reported
-                # distinctly so the cause is not lost.
-                if execution_status in ("FAILED", "SKIPPED") or meta.get(
-                    "failure_messages"
-                ):
+                # A stage failure is recorded when an evidential detector did not
+                # produce observations: FAILED (broken capability) always, and
+                # UNAVAILABLE (no capability), reported distinctly so the cause
+                # is not lost. Not a failure: AVAILABLE+SKIPPED (deliberately
+                # not run, e.g. unsupported media type), or any skip of a
+                # non-evidential detector -- an absent object detector used to
+                # mark every image analysis PARTIAL.
+                detector_name = det_data.get("detector", "unknown")
+                non_evidential = _SIGNAL_FAMILY.get(detector_name) == "non_evidential"
+                is_gap = execution_status == "FAILED" or (
+                    execution_status == "SKIPPED"
+                    and availability == "UNAVAILABLE"
+                    and not non_evidential
+                )
+                if is_gap or meta.get("failure_messages"):
                     failures.append(
                         f"detection: {det_data.get('detector', 'unknown')} incomplete "
                         f"[{availability}/{execution_status}]: "
@@ -615,9 +635,13 @@ class AnalysisPipeline:
             # OBSERVATION / UNCERTAINTY: Per detector
             for det in detections:
                 meta = det.detector_metadata or {}
-                assessment = meta.get("assessment", "INCONCLUSIVE")
+                # The detection's own assessment column. Detectors stopped
+                # writing ``assessment`` into their metadata, so reading it from
+                # there labelled every detector INCONCLUSIVE, including ones
+                # that completed with a clear result.
+                assessment = _plain_value(det.assessment or "INCONCLUSIVE")
 
-                if assessment == "SUSPICIOUS":
+                if assessment in _SUSPICIOUS_VALUES:
                     desc = (
                         f"OBSERVATION: {det.detector} detected forensic anomalies "
                         f"(type: {det.manipulation_type}, confidence: {det.confidence:.2f}). "
@@ -627,14 +651,24 @@ class AnalysisPipeline:
                 elif assessment == "INCONCLUSIVE":
                     desc = (
                         f"UNCERTAINTY: {det.detector} returned INCONCLUSIVE "
-                        f"(type: {det.manipulation_type}). {meta.get('note', meta.get('reason', ''))}"
+                        f"(type: {det.manipulation_type}). "
+                        f"{det.status_reason or meta.get('note', meta.get('reason', ''))}"
                     )
                     cat = "UNCERTAINTY"
-                else:  # CLEAN, UNAVAILABLE
+                elif assessment in _COMPLETE_NEGATIVE:
+                    # A completed check that found nothing above its threshold
+                    # is an observation, not an uncertainty.
                     desc = (
-                        f"UNCERTAINTY: {det.detector} assessment: {assessment} "
-                        f"(type: {det.manipulation_type}). "
-                        f"{meta.get('note', meta.get('reason', ''))}"
+                        f"OBSERVATION: {det.detector} completed and reported no "
+                        f"anomalies above its threshold (type: {det.manipulation_type}). "
+                        "This is not a finding of authenticity."
+                    )
+                    cat = "OBSERVATION"
+                else:  # UNAVAILABLE: the check did not run
+                    desc = (
+                        f"UNCERTAINTY: {det.detector} did not produce observations "
+                        f"({assessment}). "
+                        f"{det.status_reason or meta.get('note', meta.get('reason', ''))}"
                     )
                     cat = "UNCERTAINTY"
 
@@ -727,12 +761,21 @@ class AnalysisPipeline:
         suspicious = [
             d for d, a in zip(detections, assessments) if a in _SUSPICIOUS_VALUES
         ]
-        # Anything that is not a completed, anomaly-free observation means the
-        # analysis did not fully cover the evidence.
-        incomplete = [
-            a for a in assessments
-            if a not in _COMPLETE_NEGATIVE and a not in _SUSPICIOUS_VALUES
+        # Non-evidential detectors (object detection) cannot leave a gap in
+        # coverage: their result is not evidence either way, so neither is their
+        # absence. Counting a skipped object detector here made every analysis
+        # INCONCLUSIVE.
+        # Polarity, not the label alone: a FAILED run can carry an INCONCLUSIVE
+        # label, and it is a gap, not a detector that ran and was undecided.
+        polarities = [
+            observation_polarity(d) for d in detections
+            if _SIGNAL_FAMILY.get(d.detector) != "non_evidential"
         ]
+        negative = [p for p in polarities if p == "NO_ANOMALY_OBSERVED"]
+        # Ran, but could not support a determination either way.
+        undetermined = [p for p in polarities if p == "INDETERMINATE"]
+        # Did not produce observations at all (unavailable, failed, skipped).
+        incomplete = [p for p in polarities if p is None]
 
         # Positive observations stand even when other detectors did not report:
         # missing data cannot retract an anomaly that was measured.
@@ -780,17 +823,35 @@ class AnalysisPipeline:
                 Assessment.INCONCLUSIVE.value, EvidenceStrength.NONE.value,
                 "incomplete_coverage",
                 f"No anomaly was reported, but {len(incomplete)} of "
-                f"{len(detections)} detector(s) did not complete an observation, "
-                "so the absence of anomalies cannot be reported.",
+                f"{len(polarities)} evidential detector(s) did not complete an "
+                "observation, so the absence of anomalies cannot be reported.",
             )
 
+        # Everything that ran was inconclusive: nothing found "no anomaly".
+        if not negative:
+            return AssessmentDecision(
+                Assessment.INCONCLUSIVE.value, EvidenceStrength.NONE.value,
+                "no_determination",
+                f"No anomaly was reported, but none of the {len(undetermined)} "
+                "evidential detector(s) that ran could support a determination "
+                "either way.",
+            )
+
+        rationale = (
+            f"{len(negative)} evidential detector(s) completed and none reported "
+            "an anomaly above its threshold."
+        )
+        if undetermined:
+            rationale += (
+                f" {len(undetermined)} more ran but could not support a "
+                "determination."
+            )
         return AssessmentDecision(
             Assessment.NO_SIGNIFICANT_ANOMALIES_DETECTED.value,
             EvidenceStrength.NONE.value,
             "full_coverage_no_anomaly",
-            f"All {len(detections)} detector(s) completed and none reported an "
-            "anomaly above its threshold. This is a statement about what was "
-            "looked for and not found, not a determination of authenticity.",
+            rationale + " This is a statement about what was looked for and not "
+            "found, not a determination of authenticity.",
         )
 
     # ── Forensic record: observations -> finding -> assessment ────────────────
