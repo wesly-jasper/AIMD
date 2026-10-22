@@ -128,3 +128,9 @@ pnpm-debug.log*
 .DS_Store
 Thumbs.db
 desktop.ini
+
+# Local AI-tool folders (kept on disk, not in the repo)
+.claude/
+.agents/
+.taste-skill/
+skills-lock.json
