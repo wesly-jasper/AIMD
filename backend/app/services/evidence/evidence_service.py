@@ -232,7 +232,7 @@ class EvidenceService:
             "classified_evidence": classified_items,
             "limitations": limitations,
             "overall_assessment": analysis.assessment,
-            "overall_confidence": analysis.overall_confidence,
+            "evidence_strength": analysis.evidence_strength,
             "generated_at": datetime.now(timezone.utc).isoformat(),
         }
 

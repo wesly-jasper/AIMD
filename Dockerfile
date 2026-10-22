@@ -1,9 +1,9 @@
-# Multi-stage build for AIMD
-FROM node:20-alpine AS frontend-builder
-WORKDIR /app/frontend
-COPY frontend/package*.json ./
+# Multi-stage build for AIMD Sentinel
+FROM node:20-alpine AS web-builder
+WORKDIR /app/web
+COPY web/package*.json ./
 RUN npm install
-COPY frontend ./
+COPY web ./
 RUN npm run build
 
 FROM python:3.11-slim AS backend
@@ -25,7 +25,7 @@ COPY backend/requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY backend /app/backend
-COPY --from=frontend-builder /app/frontend/dist /app/frontend/dist
+COPY --from=web-builder /app/web/dist /app/web/dist
 
 WORKDIR /app/backend
 EXPOSE 8000

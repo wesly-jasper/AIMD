@@ -1,10 +1,16 @@
 import logging
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, List, Optional
 
 import numpy as np
 
-from app.schemas.detection import Assessment, DetectionRegion, DetectionResult
+from app.schemas.detection import (
+    DetectionRegion,
+    DetectionResult,
+    DetectorAvailability,
+    DetectorExecutionStatus,
+    ScoreSemantics,
+)
 from app.services.detection.detectors.base_detector import BaseDetector
 
 logger = logging.getLogger(__name__)
@@ -15,26 +21,46 @@ try:
     import librosa
     import soundfile
     _LIBROSA_AVAILABLE = True
-except ImportError:
+    _LIBROSA_IMPORT_ERROR: Optional[str] = None
+except ImportError as _exc:
     _LIBROSA_AVAILABLE = False
-    logger.warning("librosa not available -- audio analysis will return UNAVAILABLE")
+    _LIBROSA_IMPORT_ERROR = f"{type(_exc).__name__}: {_exc}"
+    logger.warning(
+        "librosa/soundfile not available -- audio detectors will report "
+        "UNAVAILABLE (%s)", _LIBROSA_IMPORT_ERROR
+    )
 
 
 class BaseAudioAnalyzer(BaseDetector):
-    pass
+    manipulation_type = "audio"
+    supported_media_types = frozenset({"audio"})
+
+    def availability(self) -> tuple[DetectorAvailability, Optional[str]]:
+        """Audio analysis here is entirely librosa/soundfile based."""
+        if not _LIBROSA_AVAILABLE:
+            return (
+                DetectorAvailability.UNAVAILABLE,
+                f"librosa/soundfile not installed ({_LIBROSA_IMPORT_ERROR})",
+            )
+        return DetectorAvailability.AVAILABLE, None
 
 
 class BaselineAudioAnalyzer(BaseAudioAnalyzer):
     """
     Baseline Audio Spectral Forensics Analyzer.
-    Extracts acoustic features (RMS, spectral centroid, spectral rolloff, zero-crossing rate, MFCCs)
-    and detects spectral discontinuities and processing anomalies.
+
+    Extracts acoustic features (RMS, spectral centroid, spectral rolloff,
+    zero-crossing rate, MFCCs) and locates spectral discontinuities.
+
+    A completed run is INCONCLUSIVE by design: these features describe the
+    recording's acoustic character, and no threshold has been established that
+    separates edited speech from speech that was merely recorded in an unusual
+    room. The discontinuity regions are worth an examiner's attention; the
+    composite number is not a finding.
     """
 
-    DETECTOR_VERSION = "1.0-baseline"
-
-    def __init__(self):
-        self.status = "baseline"
+    detector_id = "BaselineAudioAnalyzer"
+    version = "1.0-baseline"
 
     def detect(self, file_path: str) -> DetectionResult:
         path = Path(file_path)
@@ -45,28 +71,52 @@ class BaselineAudioAnalyzer(BaseAudioAnalyzer):
         is_audio = ext in _AUDIO_EXTS
         media_type = "audio" if is_audio else "video"
 
-        if not _LIBROSA_AVAILABLE:
-            return self._unavailable(path, media_type, "librosa not installed")
+        availability, reason = self.availability()
+        if availability is not DetectorAvailability.AVAILABLE:
+            return self.unavailable(
+                reason or "librosa is unavailable", media_type=media_type
+            )
 
         if not is_audio:
-            return self._unavailable(path, media_type, "Not an audio file")
+            # AVAILABLE + SKIPPED: this detector works, it was simply not pointed
+            # at audio. Recording that as UNAVAILABLE described our own routing
+            # decision as a missing dependency.
+            return self.skipped(
+                f"Not an audio file (extension {ext or 'none'!r} is not one of "
+                f"{sorted(_AUDIO_EXTS)})",
+                media_type=media_type,
+            )
 
         try:
             return self._analyse(path, media_type)
         except Exception as exc:
             logger.warning("Audio analysis failed for %s: %s", path, exc)
-            return self._unavailable(path, media_type, str(exc))
+            # AVAILABLE + FAILED. librosa is installed, so the capability is
+            # present; this run broke. The two used to be the same label, which
+            # made a crashing detector indistinguishable from an uninstalled one.
+            return self.failed(
+                f"Audio analysis failed: {type(exc).__name__}", media_type=media_type
+            )
 
     def _analyse(self, file_path: Path, media_type: str) -> DetectionResult:
         import librosa
 
         try:
             y, sr = librosa.load(str(file_path), sr=22050, mono=True)
-        except Exception:
-            return self._unavailable(file_path, media_type, "Unreadable or corrupted audio file")
+        except Exception as exc:
+            # A problem with the evidence, not with the capability.
+            return self.failed(
+                f"Unreadable or corrupted audio file ({type(exc).__name__})",
+                media_type=media_type,
+            )
 
         if len(y) == 0:
-            return self._unavailable(file_path, media_type, "Empty audio signal")
+            # Nothing was examined, so there is no observation in either
+            # direction. Not a negative result.
+            return self.failed(
+                "Audio stream decoded to an empty signal; no samples to analyse",
+                media_type=media_type,
+            )
 
         duration = len(y) / sr
         hop_length = 512
@@ -102,20 +152,25 @@ class BaselineAudioAnalyzer(BaseAudioAnalyzer):
         flux_score = float(np.clip(spectral_flux / 1e6, 0.0, 1.0))
         discontinuity_score = float(np.clip(len(discontinuity_frames) / max(1, len(spec_centroid)), 0.0, 1.0))
 
+        # Hand-chosen weights over three normalisers that were also hand-chosen
+        # (/500, /1e6). No fitting against labelled audio has been performed, so
+        # this orders recordings and is not a probability of manipulation.
         heuristic_score = round(mfcc_score * 0.30 + flux_score * 0.30 + discontinuity_score * 0.40, 4)
 
-        return DetectionResult(
-            detector="BaselineAudioAnalyzer",
+        # INCONCLUSIVE, so the per-run score is dropped and the regions are kept.
+        # That is deliberate: the number has no established threshold, and
+        # reporting it as a confidence alongside a COMPLETED status would invite
+        # exactly the reading it cannot support.
+        return self.inconclusive(
+            "Acoustic features extracted and "
+            f"{len(discontinuity_frames)} spectral discontinuity frame(s) located. "
+            "No validated threshold separates edited audio from unusual but "
+            "unedited recordings, so these features localise regions for review "
+            "and do not support a determination.",
             media_type=media_type,
-            manipulation_detected=False,
-            confidence=heuristic_score,
-            manipulation_type="audio",
-            assessment=Assessment.INCONCLUSIVE,
             regions=suspicious_regions[:10],
             metadata={
-                "status": "baseline",
-                "detector_version": self.DETECTOR_VERSION,
-                "assessment": "INCONCLUSIVE",
+                "detector_version": self.version,
                 "duration_seconds": round(duration, 3),
                 "sample_rate": sr,
                 "features": {
@@ -130,7 +185,13 @@ class BaselineAudioAnalyzer(BaseAudioAnalyzer):
                     "spectral_flux": round(spectral_flux, 4),
                     "spectral_discontinuities": int(len(discontinuity_frames)),
                 },
+                # Reported under its own name, not as a confidence, with its
+                # provenance attached.
                 "heuristic_score": heuristic_score,
+                "heuristic_score_provenance": (
+                    "hand-chosen weights over hand-chosen normalisers; not "
+                    "calibrated against labelled audio"
+                ),
             },
         )
 
@@ -155,76 +216,94 @@ class BaselineAudioAnalyzer(BaseAudioAnalyzer):
             )
         return regions
 
-    def _unavailable(self, file_path: Path, media_type: str, reason: str) -> DetectionResult:
-        return DetectionResult(
-            detector="BaselineAudioAnalyzer",
-            media_type=media_type,
-            manipulation_detected=False,
-            confidence=0.0,
-            manipulation_type="audio",
-            assessment=Assessment.UNAVAILABLE,
-            regions=[],
-            metadata={
-                "assessment": "UNAVAILABLE",
-                "status": "baseline",
-                "reason": reason,
-                "note": "Audio analysis unavailable or file unreadable.",
-            },
-        )
 
-
-class NeuralSpeechDetector(BaseAudioAnalyzer):
+class SpectralSpeechHeuristicDetector(BaseAudioAnalyzer):
     """
-    Deep Neural Acoustic & Synthetic Speech (AI Voice Clone) Detector.
-    Evaluates acoustic mel-spectrogram consistency, high-frequency harmonic phase artifacts,
-    and voice synthesis signatures.
+    Synthetic-speech *heuristic* over mel-spectrogram statistics.
+
+    WHY THIS CLASS WAS RENAMED
+    --------------------------
+    It was called ``NeuralSpeechDetector``, documented as a "Deep Neural Acoustic
+    & Synthetic Speech (AI Voice Clone) Detector", and versioned
+    "2.0-neural-acoustic". It performs **no neural inference**. It imported
+    ``torch`` and never used it, then computed two librosa statistics --
+    mean absolute frame-to-frame difference of the log-mel spectrogram, and mean
+    spectral flatness -- and compared each to a hand-picked constant.
+
+    The name, the docstring and the version string were therefore all claims
+    about a capability that does not exist in this repository, and they were the
+    text an examiner would read when asking what produced a result. The class is
+    renamed, the version string says "heuristic", and the unused ``torch`` import
+    is gone.
+
+    What it actually measures: AI voice synthesis *can* leave over-smooth formant
+    transitions and vocoder noise in the high bands. So can low-bitrate
+    compression, noise suppression, and a close-miked studio recording. The two
+    thresholds below were chosen by judgement against no labelled corpus, so a
+    completed run reports HEURISTIC_SEVERITY and localises segments; it is not a
+    voice-clone determination.
     """
 
-    DETECTOR_VERSION = "2.0-neural-acoustic"
+    detector_id = "SpectralSpeechHeuristicDetector"
+    version = "2.0-spectral-heuristic"
 
     def __init__(self, device: Optional[str] = None):
         self._device = device
-        self.baseline_analyzer = BaselineAudioAnalyzer()
 
     def detect(self, file_path: str) -> DetectionResult:
         path = Path(file_path)
         if not path.exists():
             raise FileNotFoundError(f"File not found: {file_path}")
 
-        if not _LIBROSA_AVAILABLE:
-            return self.baseline_analyzer.detect(file_path)
+        availability, reason = self.availability()
+        if availability is not DetectorAvailability.AVAILABLE:
+            # Previously every one of these paths returned
+            # ``self.baseline_analyzer.detect(file_path)``: a different
+            # detector's result, under a different detector's identity, with
+            # nothing recording that this detector had been requested. Three
+            # separate situations -- librosa missing, an empty signal, and a
+            # crash -- all arrived as a BaselineAudioAnalyzer result.
+            return self.unavailable(reason or "librosa is unavailable")
 
         try:
             import librosa
-            import torch
 
             y, sr = librosa.load(str(path), sr=16000, mono=True)
-            if len(y) == 0:
-                return self.baseline_analyzer.detect(file_path)
+        except Exception as exc:
+            return self.failed(
+                f"Audio could not be decoded for spectral analysis "
+                f"({type(exc).__name__})"
+            )
 
+        if len(y) == 0:
+            return self.failed(
+                "Audio stream decoded to an empty signal; no samples to analyse"
+            )
+
+        try:
             duration = len(y) / sr
 
-            # 1. Mel-spectrogram deep feature representation
+            # 1. Mel-spectrogram representation (a signal transform, not a model).
             mel_spec = librosa.feature.melspectrogram(y=y, sr=sr, n_mels=80, hop_length=256)
             log_mel = librosa.power_to_db(mel_spec, ref=np.max)
 
-            # 2. Synthetic speech artifact metrics:
-            # AI voice clones frequently exhibit unnaturally smooth formants or high-frequency phase cuts
+            # 2. Two hand-thresholded statistics. Synthetic speech often shows
+            # over-smooth frame-to-frame transitions and flat high bands -- and so
+            # does heavily compressed or noise-suppressed natural speech, which is
+            # why neither threshold can carry a conclusion on its own.
             diff_time = np.abs(np.diff(log_mel, axis=1))
             temporal_smoothness = float(np.mean(diff_time))
 
-            # Spectral flatness in high bands
             high_band_flatness = float(np.mean(librosa.feature.spectral_flatness(y=y)[0]))
 
-            # Score computation
             synth_score = 0.10
-            if temporal_smoothness < 2.5:  # Overly smooth AI voice transitions
+            if temporal_smoothness < 2.5:  # over-smooth transitions
                 synth_score += 0.35
-            if high_band_flatness > 0.08:  # Diffusion / vocoder noise signature
+            if high_band_flatness > 0.08:  # vocoder / codec noise signature
                 synth_score += 0.30
 
             synth_score = float(np.clip(synth_score, 0.05, 0.95))
-            manipulation_detected = bool(synth_score >= 0.50)
+            anomaly_flagged = bool(synth_score >= 0.50)
 
             # Temporal segment localization
             regions: List[DetectionRegion] = []
@@ -236,33 +315,44 @@ class NeuralSpeechDetector(BaseAudioAnalyzer):
                 end_t = round(float((fi + 1) * 256 / sr), 3)
                 regions.append(
                     DetectionRegion(
-                        type="synthetic_voice_segment",
+                        type="over_smooth_spectral_segment",
                         confidence=round(synth_score, 3),
                         start_timestamp=start_t,
                         end_timestamp=min(end_t, duration),
                     )
                 )
-
-            assessment = Assessment.SUSPICIOUS if manipulation_detected else Assessment.CLEAN
-
-            return DetectionResult(
-                detector="NeuralSpeechDetector",
-                media_type="audio",
-                manipulation_detected=manipulation_detected,
-                confidence=round(synth_score, 4),
-                manipulation_type="audio",
-                assessment=assessment,
-                regions=regions,
-                metadata={
-                    "status": "active_neural_speech_detector",
-                    "detector_version": self.DETECTOR_VERSION,
-                    "duration_seconds": round(duration, 3),
-                    "temporal_smoothness": round(temporal_smoothness, 4),
-                    "spectral_flatness": round(high_band_flatness, 6),
-                    "suspicious_segments_count": len(regions),
-                },
+        except Exception as exc:
+            logger.warning("Spectral speech heuristic failed: %s", exc)
+            return self.failed(
+                f"Spectral speech analysis failed ({type(exc).__name__})"
             )
 
-        except Exception as exc:
-            logger.warning(f"Neural speech detection fallback to baseline: {exc}")
-            return self.baseline_analyzer.detect(file_path)
+        return DetectionResult(
+            detector=self.detector_id,
+            detector_version=self.version,
+            media_type="audio",
+            manipulation_detected=anomaly_flagged,
+            confidence=round(synth_score, 4),
+            manipulation_type=self.manipulation_type,
+            availability=DetectorAvailability.AVAILABLE,
+            execution_status=DetectorExecutionStatus.COMPLETED,
+            # Two hand-picked thresholds over two librosa statistics. The old code
+            # assigned ``Assessment.CLEAN`` below the threshold, which let a
+            # heuristic with no validated operating point report an audio file as
+            # clean. The status fields now carry that, and CLEAN is derived only
+            # from COMPLETED + no anomaly -- still not a finding of authenticity.
+            score_semantics=ScoreSemantics.HEURISTIC_SEVERITY,
+            regions=regions,
+            metadata={
+                "detector_version": self.version,
+                "performs_neural_inference": False,
+                "method": (
+                    "log-mel temporal smoothness and spectral flatness, "
+                    "hand-thresholded"
+                ),
+                "duration_seconds": round(duration, 3),
+                "temporal_smoothness": round(temporal_smoothness, 4),
+                "spectral_flatness": round(high_band_flatness, 6),
+                "suspicious_segments_count": len(regions),
+            },
+        )

@@ -11,7 +11,13 @@ import cv2
 import numpy as np
 from PIL import Image
 
-from app.schemas.detection import DetectionResult, DetectionRegion, Assessment
+from app.schemas.detection import (
+    DetectionRegion,
+    DetectionResult,
+    DetectorAvailability,
+    DetectorExecutionStatus,
+    ScoreSemantics,
+)
 from app.services.detection.detectors.base_detector import BaseDetector
 
 logger = logging.getLogger(__name__)
@@ -49,15 +55,22 @@ class ManipulationMaskGenerator(BaseDetector):
         self.unet_model_path = unet_model_path
         self._unet_model = None
 
+    detector_id = "ManipulationMaskGenerator"
+    version = "1.0.0"
+    supported_media_types = frozenset({"image"})
+    manipulation_type = "manipulation"
+
     def detect(self, file_path: str) -> DetectionResult:
         path = Path(file_path)
         if not path.exists():
-            raise FileNotFoundError(f"File not found: {file_path}")
+            # The detector works; the evidence was not readable. Reporting this as
+            # UNAVAILABLE would blame the capability for a missing input.
+            return self.failed("Image input file is missing")
 
         try:
             img = cv2.imread(str(path))
             if img is None:
-                raise ValueError(f"Unable to read image at {file_path}")
+                return self.failed("Image input is empty, invalid, or unsupported")
 
             h, w = img.shape[:2]
 
@@ -79,12 +92,17 @@ class ManipulationMaskGenerator(BaseDetector):
                 regions = self._refine_with_unet(img, heatmap, regions)
 
             return DetectionResult(
-                detector="ManipulationMaskGenerator",
+                detector=self.detector_id,
+                detector_version=self.version,
                 media_type="image",
                 manipulation_detected=manipulation_detected,
                 confidence=round(max_conf, 4),
-                manipulation_type="manipulation",
-                assessment=Assessment.SUSPICIOUS if manipulation_detected else Assessment.CLEAN,
+                manipulation_type=self.manipulation_type,
+                availability=DetectorAvailability.AVAILABLE,
+                execution_status=DetectorExecutionStatus.COMPLETED,
+                # A fused multi-scale ELA/FFT/noise heatmap maximum. Ordinal
+                # severity only -- it is not a probability of manipulation.
+                score_semantics=ScoreSemantics.HEURISTIC_SEVERITY,
                 regions=regions,
                 metadata={
                     "status": "active_mask_generation",
@@ -98,13 +116,22 @@ class ManipulationMaskGenerator(BaseDetector):
                         "std": float(heatmap.std()),
                     },
                     "regions_found": len(regions),
+                    "unet_refinement": (
+                        "unavailable" if self.enable_unet and self._unet_model is None
+                        else "configured" if self.enable_unet
+                        else "disabled"
+                    ),
                     "note": "OBSERVATION: Pixel-level manipulation heatmap generated. Regions indicate suspicious areas.",
                 },
             )
 
         except Exception as e:
             logger.warning(f"ManipulationMaskGenerator failed: {e}")
-            return self._inconclusive(str(e))
+            # AVAILABLE + FAILED. This was previously reported as UNAVAILABLE,
+            # which made a crash in mask computation look like a detector that had
+            # never been installed -- hiding a defect that needs a code fix behind
+            # what reads as a configuration gap.
+            return self.failed(f"Mask computation failed: {type(e).__name__}")
 
     def _generate_multiscale_heatmap(self, img: np.ndarray) -> np.ndarray:
         """Generate manipulation heatmap at multiple scales and fuse them."""
@@ -264,6 +291,7 @@ class ManipulationMaskGenerator(BaseDetector):
     def _compute_gradient_heatmap(self, img: np.ndarray) -> np.ndarray:
         """Compute gradient inconsistency heatmap."""
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY).astype(np.float32) / 255.0
+        h, w = gray.shape
 
         # Compute gradients
         gx = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3)
@@ -296,6 +324,7 @@ class ManipulationMaskGenerator(BaseDetector):
         # Convert to LAB
         lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB).astype(np.float32)
         l, a, b = cv2.split(lab)
+        h, w = l.shape
 
         # Check for unnatural color transitions
         # Compute local statistics in LAB space
@@ -395,21 +424,11 @@ class ManipulationMaskGenerator(BaseDetector):
         # This would replace bounding boxes with pixel-perfect masks
         return regions
 
-    def _inconclusive(self, reason: str) -> DetectionResult:
-        return DetectionResult(
-            detector="ManipulationMaskGenerator",
-            media_type="image",
-            manipulation_detected=False,
-            confidence=0.0,
-            manipulation_type="manipulation",
-            assessment=Assessment.INCONCLUSIVE,
-            regions=[],
-            metadata={
-                "assessment": "INCONCLUSIVE",
-                "reason": reason,
-                "note": f"UNCERTAINTY: Manipulation mask generation unavailable - {reason}",
-            },
-        )
+    # `_inconclusive` and `_unavailable` were removed here. Both are now on
+    # BaseDetector as `inconclusive()`, `unavailable()`, `failed()` and
+    # `skipped()`, so the four situations cannot be conflated and every detector
+    # reports them the same way. The old local `_unavailable` was being used for
+    # a crash, which is `failed()`.
 
 
 class DeepfakeSegmentationModel:

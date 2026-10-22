@@ -47,25 +47,26 @@
         }
       }
     },
-    "/api/v1/auth/register": {
+    "/api/v1/auth/signup": {
       "post": {
         "tags": [
           "Authentication"
         ],
-        "summary": "Register",
-        "operationId": "register_api_v1_auth_register_post",
+        "summary": "Signup",
+        "description": "Create an ordinary account and sign it in.\n\nA taken email returns 409. That does confirm the address has an account --\nthe usual trade-off for a sign-up form that can tell people why it failed;\nthe per-address rate limit bounds how fast it can be probed.",
+        "operationId": "signup_api_v1_auth_signup_post",
         "requestBody": {
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/RegisterRequest"
+                "$ref": "#/components/schemas/SignupRequest"
               }
             }
           },
           "required": true
         },
         "responses": {
-          "200": {
+          "201": {
             "description": "Successful Response",
             "content": {
               "application/json": {
@@ -119,8 +120,8 @@
         "tags": [
           "Media"
         ],
-        "summary": "Upload media for forensic analysis",
-        "description": "Upload an image, video, or audio file.\n\nValidates the file type using magic bytes, stores it securely,\ncomputes SHA-256, and persists a MediaRecord to the database.\n\nReturns the media_id -- use this with POST /api/v1/analysis to run analysis.",
+        "summary": "Upload media for analysis",
+        "description": "Upload an image, video or audio file into the caller's account.\n\nValidates the content by magic bytes, stores it, records its SHA-256, and\nreturns its id -- then POST /api/v1/analysis runs the detectors on it.",
         "operationId": "upload_media_api_v1_media_upload_post",
         "requestBody": {
           "content": {
@@ -151,7 +152,111 @@
               }
             }
           }
+        },
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ]
+      }
+    },
+    "/api/v1/media/": {
+      "get": {
+        "tags": [
+          "Media"
+        ],
+        "summary": "List your media",
+        "operationId": "list_media_api_v1_media__get",
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 200,
+              "minimum": 1,
+              "default": 20,
+              "title": "Limit"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0,
+              "title": "Offset"
+            }
+          },
+          {
+            "name": "case_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Case Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
         }
+      }
+    },
+    "/api/v1/media/usage": {
+      "get": {
+        "tags": [
+          "Media"
+        ],
+        "summary": "Your uploads against the daily limit",
+        "operationId": "usage_api_v1_media_usage_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ]
       }
     },
     "/api/v1/media/{media_id}": {
@@ -159,9 +264,13 @@
         "tags": [
           "Media"
         ],
-        "summary": "Retrieve media metadata",
-        "description": "Retrieve stored metadata and fingerprints for an uploaded media file.",
+        "summary": "Retrieve one of your media",
         "operationId": "get_media_api_v1_media__media_id__get",
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
         "parameters": [
           {
             "name": "media_id",
@@ -181,6 +290,45 @@
                 "schema": {}
               }
             }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "Media"
+        ],
+        "summary": "Delete one of your media",
+        "description": "Delete the media, its analyses and everything derived from them, and the\nstored bytes. The audit trail keeps a record that it existed and was deleted:\naudit events are not foreign keys, so they survive their subject.",
+        "operationId": "delete_media_api_v1_media__media_id__delete",
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "media_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Media Id"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
           },
           "422": {
             "description": "Validation Error",
@@ -200,9 +348,14 @@
         "tags": [
           "Media"
         ],
-        "summary": "Download/stream stored media file",
-        "description": "Stream or download the original stored media file.",
+        "summary": "Download one of your media",
+        "description": "The original bytes. The stored path is re-confined to the evidence roots on\nevery request (defence in depth against a path persisted by any other route).",
         "operationId": "download_media_api_v1_media__media_id__download_get",
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
         "parameters": [
           {
             "name": "media_id",
@@ -211,539 +364,6 @@
             "schema": {
               "type": "string",
               "title": "Media Id"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/v1/media/": {
-      "get": {
-        "tags": [
-          "Media"
-        ],
-        "summary": "List uploaded media",
-        "operationId": "list_media_api_v1_media__get",
-        "parameters": [
-          {
-            "name": "limit",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "integer",
-              "default": 20,
-              "title": "Limit"
-            }
-          },
-          {
-            "name": "offset",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "integer",
-              "default": 0,
-              "title": "Offset"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/v1/detection/analyze": {
-      "post": {
-        "tags": [
-          "Detection"
-        ],
-        "summary": "Run detection only (no full pipeline)",
-        "description": "Run multimodal detection on a file path.\nResults are persisted to the database.\n\nNOTE: For full forensic investigation (fingerprinting, provenance, evidence),\nuse POST /api/v1/analysis with a media_id instead.",
-        "operationId": "analyze_media_api_v1_detection_analyze_post",
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/DetectionRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/v1/detection/{analysis_id}": {
-      "get": {
-        "tags": [
-          "Detection"
-        ],
-        "summary": "Retrieve detection results",
-        "description": "Retrieve detection results for a completed pipeline analysis.",
-        "operationId": "get_detection_results_api_v1_detection__analysis_id__get",
-        "parameters": [
-          {
-            "name": "analysis_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Analysis Id"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/v1/fingerprint/generate": {
-      "post": {
-        "tags": [
-          "Investigation"
-        ],
-        "summary": "Generate fingerprints for a file",
-        "description": "Generate SHA-256, pHash, and dHash fingerprints for a file path.",
-        "operationId": "generate_fingerprint_api_v1_fingerprint_generate_post",
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/GenerateFingerprintRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/v1/similarity/search": {
-      "post": {
-        "tags": [
-          "Investigation"
-        ],
-        "summary": "Search for similar media",
-        "description": "Search local stored fingerprints for visually or perceptually similar media.\nExternal internet search is returned as UNAVAILABLE if no provider is configured.",
-        "operationId": "similarity_search_api_v1_similarity_search_post",
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/SimilaritySearchRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/v1/source/trace": {
-      "post": {
-        "tags": [
-          "Investigation"
-        ],
-        "summary": "Trace earliest-known source",
-        "description": "Traces the earliest-known occurrence of the media.\nReturns UNAVAILABLE for internet search if no provider is configured.",
-        "operationId": "trace_source_api_v1_source_trace_post",
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/SourceTraceRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/v1/source/{analysis_id}": {
-      "get": {
-        "tags": [
-          "Investigation"
-        ],
-        "summary": "Retrieve source tracing results",
-        "operationId": "get_source_api_v1_source__analysis_id__get",
-        "parameters": [
-          {
-            "name": "analysis_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Analysis Id"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/v1/provenance/{analysis_id}": {
-      "get": {
-        "tags": [
-          "Investigation"
-        ],
-        "summary": "Retrieve provenance graph",
-        "operationId": "get_provenance_api_v1_provenance__analysis_id__get",
-        "parameters": [
-          {
-            "name": "analysis_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Analysis Id"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/v1/evidence/{analysis_id}": {
-      "get": {
-        "tags": [
-          "Investigation"
-        ],
-        "summary": "Alias for evidence package",
-        "operationId": "get_evidence_alias_api_v1_evidence__analysis_id__get",
-        "parameters": [
-          {
-            "name": "analysis_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Analysis Id"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/v1/report/{analysis_id}": {
-      "get": {
-        "tags": [
-          "Investigation"
-        ],
-        "summary": "Retrieve forensic report",
-        "description": "Retrieve the JSON and Markdown forensic report for an analysis.",
-        "operationId": "get_report_api_v1_report__analysis_id__get",
-        "parameters": [
-          {
-            "name": "analysis_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Analysis Id"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/v1/report/{analysis_id}/json": {
-      "get": {
-        "tags": [
-          "Investigation"
-        ],
-        "summary": "Download JSON report",
-        "operationId": "get_report_json_api_v1_report__analysis_id__json_get",
-        "parameters": [
-          {
-            "name": "analysis_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Analysis Id"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/v1/report/{analysis_id}/html": {
-      "get": {
-        "tags": [
-          "Investigation"
-        ],
-        "summary": "Download HTML report",
-        "operationId": "get_report_html_api_v1_report__analysis_id__html_get",
-        "parameters": [
-          {
-            "name": "analysis_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Analysis Id"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/v1/report/{analysis_id}/pdf": {
-      "get": {
-        "tags": [
-          "Investigation"
-        ],
-        "summary": "Download PDF report",
-        "operationId": "get_report_pdf_api_v1_report__analysis_id__pdf_get",
-        "parameters": [
-          {
-            "name": "analysis_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Analysis Id"
             }
           }
         ],
@@ -777,6 +397,11 @@
         "summary": "Run forensic analysis pipeline",
         "description": "Run the complete AIMD forensic analysis pipeline on an uploaded media file.\n\nStages: metadata -> frames -> detection -> fingerprinting -> similarity\n        -> source tracing -> provenance -> evidence -> report\n\nAll results are persisted to the database and associated with the returned\nanalysis_id.\n\nThe analysis runs synchronously. For large video files this may take\nseveral minutes.",
         "operationId": "run_analysis_api_v1_analysis__post",
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
         "requestBody": {
           "required": true,
           "content": {
@@ -816,6 +441,11 @@
         ],
         "summary": "List analyses",
         "operationId": "list_analyses_api_v1_analysis__get",
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
         "parameters": [
           {
             "name": "limit",
@@ -823,6 +453,8 @@
             "required": false,
             "schema": {
               "type": "integer",
+              "maximum": 200,
+              "minimum": 1,
               "default": 20,
               "title": "Limit"
             }
@@ -833,8 +465,25 @@
             "required": false,
             "schema": {
               "type": "integer",
+              "minimum": 0,
               "default": 0,
               "title": "Offset"
+            }
+          },
+          {
+            "name": "media_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Media Id"
             }
           }
         ],
@@ -867,6 +516,11 @@
         ],
         "summary": "Retrieve analysis status and summary",
         "operationId": "get_analysis_api_v1_analysis__analysis_id__get",
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
         "parameters": [
           {
             "name": "analysis_id",
@@ -900,27 +554,30 @@
         }
       }
     },
-    "/api/v1/jobs/{job_id}": {
-      "get": {
+    "/api/v1/cases/": {
+      "post": {
         "tags": [
-          "Jobs"
+          "Cases"
         ],
-        "summary": "Get job / analysis status",
-        "description": "Returns job status for polling.\n\nStates: QUEUED | PROCESSING | ANALYZING | COMPLETED | FAILED | PARTIAL",
-        "operationId": "get_job_api_v1_jobs__job_id__get",
-        "parameters": [
+        "summary": "Open a case",
+        "operationId": "create_case_api_v1_cases__post",
+        "security": [
           {
-            "name": "job_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Job Id"
-            }
+            "OAuth2PasswordBearer": []
           }
         ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CaseCreate"
+              }
+            }
+          }
+        },
         "responses": {
-          "200": {
+          "201": {
             "description": "Successful Response",
             "content": {
               "application/json": {
@@ -939,15 +596,18 @@
             }
           }
         }
-      }
-    },
-    "/api/v1/jobs/": {
+      },
       "get": {
         "tags": [
-          "Jobs"
+          "Cases"
         ],
-        "summary": "List jobs / analyses",
-        "operationId": "list_jobs_api_v1_jobs__get",
+        "summary": "List cases",
+        "operationId": "list_cases_api_v1_cases__get",
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
         "parameters": [
           {
             "name": "limit",
@@ -955,6 +615,8 @@
             "required": false,
             "schema": {
               "type": "integer",
+              "maximum": 200,
+              "minimum": 1,
               "default": 20,
               "title": "Limit"
             }
@@ -965,6 +627,7 @@
             "required": false,
             "schema": {
               "type": "integer",
+              "minimum": 0,
               "default": 0,
               "title": "Offset"
             }
@@ -990,6 +653,182 @@
             }
           }
         }
+      }
+    },
+    "/api/v1/cases/{case_id}": {
+      "get": {
+        "tags": [
+          "Cases"
+        ],
+        "summary": "Retrieve a case and its evidence",
+        "operationId": "get_case_api_v1_cases__case_id__get",
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "case_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Case Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/audit/events": {
+      "get": {
+        "tags": [
+          "Audit"
+        ],
+        "summary": "List audit events",
+        "operationId": "list_events_api_v1_audit_events_get",
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "case_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Case Id"
+            }
+          },
+          {
+            "name": "media_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Media Id"
+            }
+          },
+          {
+            "name": "analysis_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Analysis Id"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 500,
+              "minimum": 1,
+              "default": 100,
+              "title": "Limit"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0,
+              "title": "Offset"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/audit/verify": {
+      "get": {
+        "tags": [
+          "Audit"
+        ],
+        "summary": "Verify the audit chain",
+        "operationId": "verify_api_v1_audit_verify_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ]
       }
     },
     "/api/v1/health": {
@@ -1072,16 +911,16 @@
             ],
             "title": "Assessment"
           },
-          "overall_confidence": {
+          "evidence_strength": {
             "anyOf": [
               {
-                "type": "number"
+                "type": "string"
               },
               {
                 "type": "null"
               }
             ],
-            "title": "Overall Confidence"
+            "title": "Evidence Strength"
           },
           "message": {
             "anyOf": [
@@ -1102,14 +941,25 @@
           "status"
         ],
         "title": "AnalysisResponse",
-        "description": "Response from a pipeline analysis request."
+        "description": "Response from a pipeline analysis request.\n\nThere is deliberately no blended numeric confidence. A single number produced\nby averaging unrelated detector scores implies the detectors are independent\nmeasurements of one quantity, which they are not: ELA severity, copy-move\nkeypoint matches, and a face-region score measure different things on\nincomparable scales, and several share the same underlying JPEG artefacts.\nAveraging them manufactures precision that the evidence does not support.\n\n``evidence_strength`` is an ordinal summary of how well the observations\nsupport the stated assessment. It is not a probability and must not be\nrendered as a percentage."
       },
       "Body_upload_media_api_v1_media_upload_post": {
         "properties": {
           "file": {
             "type": "string",
-            "format": "binary",
+            "contentMediaType": "application/octet-stream",
             "title": "File"
+          },
+          "case_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Case Id"
           }
         },
         "type": "object",
@@ -1118,41 +968,32 @@
         ],
         "title": "Body_upload_media_api_v1_media_upload_post"
       },
-      "DetectionRequest": {
+      "CaseCreate": {
         "properties": {
-          "file_path": {
+          "title": {
             "type": "string",
-            "title": "File Path"
+            "maxLength": 300,
+            "minLength": 1,
+            "title": "Title"
           },
-          "media_type": {
-            "type": "string",
-            "title": "Media Type"
+          "description": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 10000
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Description"
           }
         },
         "type": "object",
         "required": [
-          "file_path",
-          "media_type"
+          "title"
         ],
-        "title": "DetectionRequest"
-      },
-      "GenerateFingerprintRequest": {
-        "properties": {
-          "file_path": {
-            "type": "string",
-            "title": "File Path"
-          },
-          "media_id": {
-            "type": "string",
-            "title": "Media Id"
-          }
-        },
-        "type": "object",
-        "required": [
-          "file_path",
-          "media_id"
-        ],
-        "title": "GenerateFingerprintRequest"
+        "title": "CaseCreate"
       },
       "HTTPValidationError": {
         "properties": {
@@ -1171,10 +1012,14 @@
         "properties": {
           "username": {
             "type": "string",
+            "maxLength": 254,
+            "minLength": 1,
             "title": "Username"
           },
           "password": {
             "type": "string",
+            "maxLength": 256,
+            "minLength": 1,
             "title": "Password"
           }
         },
@@ -1185,87 +1030,27 @@
         ],
         "title": "LoginRequest"
       },
-      "RegisterRequest": {
+      "SignupRequest": {
         "properties": {
-          "username": {
+          "email": {
             "type": "string",
-            "title": "Username"
+            "maxLength": 150,
+            "minLength": 3,
+            "title": "Email"
           },
           "password": {
             "type": "string",
+            "maxLength": 256,
+            "minLength": 12,
             "title": "Password"
-          },
-          "email": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Email"
-          },
-          "role": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Role",
-            "default": "investigator"
           }
         },
         "type": "object",
         "required": [
-          "username",
+          "email",
           "password"
         ],
-        "title": "RegisterRequest"
-      },
-      "SimilaritySearchRequest": {
-        "properties": {
-          "file_path": {
-            "type": "string",
-            "title": "File Path"
-          },
-          "media_id": {
-            "type": "string",
-            "title": "Media Id"
-          }
-        },
-        "type": "object",
-        "required": [
-          "file_path",
-          "media_id"
-        ],
-        "title": "SimilaritySearchRequest"
-      },
-      "SourceTraceRequest": {
-        "properties": {
-          "file_path": {
-            "type": "string",
-            "title": "File Path"
-          },
-          "media_id": {
-            "type": "string",
-            "title": "Media Id"
-          },
-          "analysis_id": {
-            "type": "string",
-            "title": "Analysis Id"
-          }
-        },
-        "type": "object",
-        "required": [
-          "file_path",
-          "media_id",
-          "analysis_id"
-        ],
-        "title": "SourceTraceRequest"
+        "title": "SignupRequest"
       },
       "TokenResponse": {
         "properties": {
@@ -1285,13 +1070,18 @@
           "role": {
             "type": "string",
             "title": "Role"
+          },
+          "expires_in_seconds": {
+            "type": "integer",
+            "title": "Expires In Seconds"
           }
         },
         "type": "object",
         "required": [
           "access_token",
           "username",
-          "role"
+          "role",
+          "expires_in_seconds"
         ],
         "title": "TokenResponse"
       },
@@ -1314,8 +1104,7 @@
           },
           "role": {
             "type": "string",
-            "title": "Role",
-            "default": "investigator"
+            "title": "Role"
           },
           "is_active": {
             "type": "boolean",
@@ -1325,7 +1114,8 @@
         },
         "type": "object",
         "required": [
-          "username"
+          "username",
+          "role"
         ],
         "title": "User"
       },
@@ -1352,6 +1142,13 @@
           "type": {
             "type": "string",
             "title": "Error Type"
+          },
+          "input": {
+            "title": "Input"
+          },
+          "ctx": {
+            "type": "object",
+            "title": "Context"
           }
         },
         "type": "object",

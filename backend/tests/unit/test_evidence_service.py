@@ -36,7 +36,6 @@ def test_evidence_service_build_package(db_session):
         "media_id": "media_test_123",
         "status": "COMPLETED",
         "assessment": "SUSPICIOUS",
-        "overall_confidence": 0.85,
     })
 
     # 3. Create fingerprint record

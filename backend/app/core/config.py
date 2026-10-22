@@ -89,8 +89,29 @@ class Settings(BaseSettings):
     processing_timeout_seconds: int = 600
 
     # ── Security / App ────────────────────────────────────────────────────────
+    # Controls whether a missing JWT signing key is fatal; see app.core.auth.
     app_env: str = "development"
-    secret_key: str = "aimd_forensic_platform_secret_key_change_in_production"
+    # There is deliberately no ``secret_key`` setting. It held a copy of the same
+    # hardcoded signing key as app.core.auth and was imported by nothing, so a
+    # deployment that dutifully overrode it changed no behaviour at all. The
+    # signing key is read from AIMD_JWT_SECRET by app.core.auth, which has no
+    # default and refuses the committed placeholder.
+
+    # ── Rate limits ───────────────────────────────────────────────────────────
+    # ``limits`` notation ("10/minute", "100/hour;10/minute"). Counted per client
+    # address *per endpoint*; see app.core.rate_limit for what that does and does
+    # not protect against. An unparseable value is fatal at import -- the library
+    # would otherwise log it and install no limit at all.
+    rate_limit_default: str = "120/minute"
+    rate_limit_login: str = "10/minute"
+    rate_limit_signup: str = "5/hour"
+    rate_limit_upload: str = "30/minute"
+    rate_limit_analysis: str = "10/minute"
+
+    # ── Per-account quota ─────────────────────────────────────────────────────
+    # Uploads per account in any rolling 24 hours. Counted from the database, so
+    # it holds across workers and restarts, unlike the per-address rate limits.
+    daily_upload_limit: int = 50
 
     # ── External search providers ─────────────────────────────────────────────
     google_vision_api_key: Optional[str] = None

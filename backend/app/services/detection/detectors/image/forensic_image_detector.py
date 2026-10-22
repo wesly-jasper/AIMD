@@ -5,7 +5,13 @@ from PIL import Image, ImageChops, ImageEnhance
 from pathlib import Path
 from typing import Dict, Any, List
 
-from app.schemas.detection import DetectionResult, DetectionRegion
+from app.schemas.detection import (
+    DetectionRegion,
+    DetectionResult,
+    DetectorAvailability,
+    DetectorExecutionStatus,
+    ScoreSemantics,
+)
 from app.services.detection.detectors.base_detector import BaseDetector
 
 
@@ -19,6 +25,11 @@ class ForensicImageDetector(BaseDetector):
     4. Gradient & Laplacian Edge Boundary consistency.
     5. Metadata & EXIF anomaly inspection.
     """
+
+    detector_id = "ForensicImageDetector"
+    version = "1.0.0"
+    supported_media_types = frozenset({"image"})
+    manipulation_type = "image_manipulation"
 
     def __init__(self, ela_quality: int = 90, ela_scale: int = 15):
         self.ela_quality = ela_quality
@@ -49,8 +60,19 @@ class ForensicImageDetector(BaseDetector):
             # 4. Metadata / EXIF Inspection
             meta_score, meta_indicators = self._analyze_metadata(file_path)
 
-            # Aggregate scores with calibrated weights
-            # Spectral artifacts + ELA + Noise inconsistencies + Metadata
+            # Aggregate the four signal scores.
+            #
+            # These weights are hand-chosen, NOT calibrated -- no fitting against
+            # a labelled corpus has been performed, and the comment that used to
+            # claim "calibrated weights" here was wrong. The result is therefore
+            # an ordinal severity (see ``score_semantics`` below), not a
+            # probability, and it must not be read as one.
+            #
+            # The four inputs are also not independent: ELA, FFT and noise
+            # residual all respond to JPEG quantisation, so a single compression
+            # history can move three of them together. A high composite score is
+            # one observation, not three corroborating ones -- cross-detector
+            # corroboration is decided by signal family in the fusion layer.
             composite_score = (
                 fft_score * 0.35 +
                 ela_score * 0.30 +
@@ -73,11 +95,15 @@ class ForensicImageDetector(BaseDetector):
             regions = suspicious_ela_regions + noise_regions
 
             return DetectionResult(
-                detector="ForensicImageDetector",
+                detector=self.detector_id,
+                detector_version=self.version,
                 media_type="image",
                 manipulation_detected=manipulation_detected,
                 confidence=round(composite_score, 4),
                 manipulation_type=manipulation_type,
+                availability=DetectorAvailability.AVAILABLE,
+                execution_status=DetectorExecutionStatus.COMPLETED,
+                score_semantics=ScoreSemantics.HEURISTIC_SEVERITY,
                 regions=regions[:10], # Top 10 most suspicious regions
                 metadata={
                     "status": "active_forensic_engine",
@@ -91,16 +117,12 @@ class ForensicImageDetector(BaseDetector):
             )
 
         except Exception as e:
-            # Safe fallback if image decoding fails
-            return DetectionResult(
-                detector="ForensicImageDetector",
-                media_type="image",
-                manipulation_detected=False,
-                confidence=0.0,
-                manipulation_type="image",
-                regions=[],
-                metadata={"status": "error", "error": str(e)}
-            )
+            # AVAILABLE + FAILED. This detector needs nothing beyond OpenCV and
+            # PIL, so it is never genuinely unavailable: an undecodable image or a
+            # crash in one of the four analyses is a failed run, and recording it
+            # as UNAVAILABLE (as this did) blamed the capability for a problem
+            # with the evidence or with this code.
+            return self.failed(f"Image analysis failed: {type(e).__name__}")
 
     def _analyze_ela(self, file_path: Path, height: int, width: int):
         """

@@ -11,16 +11,34 @@ Implements frame-level analysis:
   7. Returns structured result with temporal AND spatial localization.
 
 Assessment values:
-  SUSPICIOUS    -- significant temporal anomaly evidence found
-  CLEAN         -- no anomalies above threshold
-  INCONCLUSIVE  -- insufficient frames or analysis failed
+  SUSPICIOUS                      -- anomalies on a material proportion of frames
+  NO_SIGNIFICANT_ANOMALIES_DETECTED
+                                  -- every sampled frame was analysed by every
+                                     frame detector and none exceeded threshold.
+                                     Records what was looked for and not found;
+                                     NOT a finding of authenticity.
+  INCONCLUSIVE                    -- insufficient frames, incomplete coverage, or
+                                     a result the thresholds cannot classify
 
-Video confidence is NOT simply the mean of random scores.
-It is derived from:
-  - Proportion of frames with elevated anomaly scores
-  - Peak anomaly score
-  - Temporal clustering of anomalies (contiguous anomalous segments)
-  - Spatial-temporal consistency of tracked regions
+WHY THERE IS NO "CLEAN FROM A LOW SCORE" BRANCH
+-----------------------------------------------
+``video_confidence`` used to drive a negative conclusion directly:
+
+    elif video_confidence < 0.20: assessment = "CLEAN"
+
+That is invalid. ``video_confidence`` blends the *proportion* of anomalous frames
+with the *peak* frame score -- a count and a magnitude, which are not
+measurements of one quantity -- and each frame's own ``combined_score`` is itself
+a blend of ELA/FFT/noise severity, optical-flow magnitude and a face-boundary
+heuristic. A low value on that composite does not mean "no anomalies"; it can
+equally mean "a short clip with one mild elevation". The negative statement is
+now made from *coverage* instead: it requires that every sampled frame was
+analysed by every frame detector with no failures, which is a fact about what
+ran rather than a threshold on a number with no referent.
+
+The composite is still reported, under its own name, with HEURISTIC_SEVERITY
+semantics. Decomposing it into attributed per-signal scores is fusion-layer work
+(see ``ImageDetectionEngine`` for the shape that work takes).
 """
 import logging
 from pathlib import Path
@@ -29,7 +47,14 @@ from typing import Any
 import cv2
 import numpy as np
 
-from app.schemas.detection import DetectionResult, DetectionRegion
+from app.schemas.detection import (
+    Assessment,
+    DetectionRegion,
+    DetectionResult,
+    DetectorAvailability,
+    DetectorExecutionStatus,
+    ScoreSemantics,
+)
 from app.services.detection.detectors.image.forensic_image_detector import ForensicImageDetector
 from app.services.detection.detectors.face_detector import BaselineFaceDetector
 from app.services.detection.engine.video_spatial_tracker import VideoSpatialTemporalTracker, TemporalAnomalyDetector
@@ -74,7 +99,11 @@ class VideoDetectionEngine:
             cap.release()
 
         if total_frames == 0 or native_fps == 0:
-            return self._inconclusive("Could not read video properties")
+            return self._failed(
+                "Could not read video properties (frame count or FPS reported "
+                "as zero); the container opened but carries no readable video "
+                "stream metadata"
+            )
 
         # Sample at ~1 FPS or native if short video
         analysis_fps = min(1.0, native_fps)
@@ -97,7 +126,9 @@ class VideoDetectionEngine:
         frame_results = self._analyse_frames(file_path, step, native_fps)
 
         if not frame_results:
-            return self._inconclusive("No frames could be analysed")
+            return self._failed(
+                "No frames could be decoded and analysed; nothing was examined"
+            )
 
         return self._aggregate(frame_results, native_fps, total_frames)
 
@@ -266,15 +297,27 @@ class VideoDetectionEngine:
             self._spatial_tracker.tracked_regions
         )
 
-        # Boost confidence if we have consistent tracked regions
-        tracked_confidence_boost = 0.0
-        if all_tracked_regions:
-            avg_temporal_consistency = np.mean([r.temporal_consistency for r in all_tracked_regions])
-            tracked_confidence_boost = min(0.15, avg_temporal_consistency * 0.2)
+        # Temporal consistency of tracked regions. Reported, NOT added to the
+        # anomaly score.
+        #
+        # This used to be a `tracked_confidence_boost` of up to +0.15 folded into
+        # `video_confidence`. Two things were wrong with that. It added a measure
+        # of *how stably a region was tracked* to a measure of *how anomalous the
+        # frames were* -- different quantities, so the sum has no referent. And it
+        # could only ever move the score upward, so every video with trackable
+        # regions looked more anomalous than the frame evidence supported. A
+        # stably tracked region is a reason to show an examiner where to look, not
+        # evidence that something was manipulated.
+        avg_temporal_consistency = (
+            float(np.mean([r.temporal_consistency for r in all_tracked_regions]))
+            if all_tracked_regions else 0.0
+        )
 
-        # Video confidence: weighted combination of proportion, peak, and tracking
+        # Composite of a proportion and a peak. Kept for continuity of the
+        # reported number and tagged HEURISTIC_SEVERITY; it no longer decides any
+        # negative conclusion (see the module docstring).
         video_confidence = round(
-            float(np.clip(proportion * 0.5 + peak_score * 0.3 + tracked_confidence_boost, 0.0, 1.0)), 4
+            float(np.clip(proportion * 0.5 + peak_score * 0.3, 0.0, 1.0)), 4
         )
 
         # Calculate failure rates
@@ -283,15 +326,32 @@ class VideoDetectionEngine:
         face_failure_rate = self._face_detector_failures / max(frames_analysed, 1)
         total_failure_rate = (self._image_detector_failures + self._face_detector_failures) / max(frames_analysed * 2, 1)
 
-        # If too many detector failures, mark as UNCERTAINTY
-        if total_failure_rate > 0.5:  # More than 50% failure rate across both detectors
+        # Assessment ladder, in order of precedence.
+        #
+        # Note the asymmetry, which is deliberate and matches the image engine: a
+        # positive observation stands even when some frames failed (missing data
+        # cannot retract an anomaly that was measured), but an *absence* of
+        # anomalies does not stand when coverage was incomplete -- "no anomalies
+        # found" cannot be reported for frames that were never analysed.
+        if total_failure_rate > 0.5:
+            # Over half the frame-detector invocations failed. Even a positive
+            # proportion computed from the remainder is not representative.
             assessment = "INCONCLUSIVE"
         elif proportion >= SUSPICIOUS_PROPORTION_THRESHOLD:
             assessment = "SUSPICIOUS"
-        elif video_confidence < 0.20:
-            assessment = "CLEAN"
-        else:
+        elif self._image_detector_failures or self._face_detector_failures:
             assessment = "INCONCLUSIVE"
+        elif suspicious_frames:
+            # Some frames were anomalous, just not a material proportion of them.
+            # Not a negative result.
+            assessment = "INCONCLUSIVE"
+        else:
+            # Full coverage, every frame analysed by both frame detectors, and no
+            # frame exceeded threshold. This is the strongest negative statement
+            # the engine is entitled to make, and it is still not a finding of
+            # authenticity: manipulation these detectors cannot measure, or
+            # confined to frames between the sampled ones, would not appear here.
+            assessment = "NO_SIGNIFICANT_ANOMALIES_DETECTED"
 
         # ── Identify suspicious segments ──────────────────────────────────────
         segments = self._identify_segments(frame_results)
@@ -317,10 +377,29 @@ class VideoDetectionEngine:
 
         result = DetectionResult(
             detector="VideoTemporalAnalysisEngine",
+            detector_version="1.1",
             media_type="video",
             manipulation_detected=assessment == "SUSPICIOUS",
             confidence=video_confidence,
             manipulation_type="temporal",
+            # Both are supplied: the status fields are authoritative, and the
+            # engine's own label is more specific than the one that would be
+            # derived from them (NO_SIGNIFICANT_ANOMALIES_DETECTED vs CLEAN).
+            availability=DetectorAvailability.AVAILABLE,
+            execution_status=(
+                DetectorExecutionStatus.INCONCLUSIVE
+                if assessment == "INCONCLUSIVE"
+                else DetectorExecutionStatus.COMPLETED
+            ),
+            # A proportion blended with a peak, over per-frame scores that are
+            # themselves blends of hand-thresholded signals. Ordinal, not a
+            # probability.
+            score_semantics=ScoreSemantics.HEURISTIC_SEVERITY,
+            status_reason=(
+                "; ".join(msg for msg in [image_failure_msg, face_failure_msg] if msg)
+                or None
+            ),
+            assessment=Assessment(assessment),
             regions=top_regions[:15],
             metadata={
                 "status": "active_temporal_analysis",
@@ -333,7 +412,13 @@ class VideoDetectionEngine:
                 "peak_frame_score": round(peak_score, 4),
                 "mean_frame_score": round(mean_score, 4),
                 "video_confidence": video_confidence,
-                "tracked_confidence_boost": round(tracked_confidence_boost, 4),
+                "video_confidence_provenance": (
+                    "0.5 * proportion of anomalous frames + 0.3 * peak frame "
+                    "score; hand-chosen weights, not calibrated"
+                ),
+                # Reported separately because it is not an anomaly measure and is
+                # deliberately excluded from the score above.
+                "avg_tracked_temporal_consistency": round(avg_temporal_consistency, 4),
                 "tracked_regions_count": len(all_tracked_regions),
                 "temporal_anomalies": temporal_anomalies,
                 "frame_scores": [
@@ -420,18 +505,41 @@ class VideoDetectionEngine:
 
         return segments
 
-    def _inconclusive(self, reason: str) -> dict[str, Any]:
+    def _non_result(
+        self,
+        execution_status: DetectorExecutionStatus,
+        reason: str,
+    ) -> dict[str, Any]:
+        """
+        A run that produced no observation, with the reason recorded on the field
+        an examiner reads rather than buried in ``metadata``.
+
+        ``confidence`` is 0.0 with NOT_APPLICABLE semantics so the zero cannot be
+        read as "analysed, and found almost no anomaly".
+
+        The predecessors of this helper passed neither ``assessment`` nor the
+        status fields, so the schema derived AVAILABLE + COMPLETED + no anomaly
+        and the result came back labelled **CLEAN**. A method named
+        ``_inconclusive`` was reporting insufficient data as a negative finding;
+        only ``metadata["assessment"]`` said otherwise, and nothing read it.
+        Passing ``execution_status`` explicitly is what prevents that.
+        """
         result = DetectionResult(
             detector="VideoTemporalAnalysisEngine",
+            detector_version="1.1",
             media_type="video",
             manipulation_detected=False,
             confidence=0.0,
             manipulation_type="temporal",
+            availability=DetectorAvailability.AVAILABLE,
+            execution_status=execution_status,
+            score_semantics=ScoreSemantics.NOT_APPLICABLE,
+            status_reason=reason,
             regions=[],
             metadata={
-                "assessment": "INCONCLUSIVE",
-                "reason": reason,
-                "note": "UNCERTAINTY: Insufficient data for temporal analysis.",
+                "status_reason": reason,
+                "availability": DetectorAvailability.AVAILABLE.value,
+                "execution_status": execution_status.value,
             },
         )
         return {
@@ -440,3 +548,21 @@ class VideoDetectionEngine:
             "suspicious_segments": [],
             "frame_level_scores": [],
         }
+
+    # There is deliberately no ``_inconclusive`` helper. Every early return from
+    # ``detect`` is a FAILED run -- a container that would not yield frames. The
+    # engine's genuine inconclusive case is reached only after frames *were*
+    # analysed, so it is expressed in ``_aggregate`` as a full result carrying
+    # frame scores and regions, not as an empty non-result.
+
+    def _failed(self, reason: str) -> dict[str, Any]:
+        """
+        Decoding or analysis did not complete.
+
+        AVAILABLE + FAILED, not UNAVAILABLE: OpenCV is installed and opened the
+        container, so the capability is present and the problem is this file or
+        this code. Reporting UNAVAILABLE pointed an operator at their
+        installation, and made an undecodable file indistinguishable from a
+        missing dependency.
+        """
+        return self._non_result(DetectorExecutionStatus.FAILED, reason)

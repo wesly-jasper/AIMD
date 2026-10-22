@@ -35,7 +35,9 @@ class ReportGenerator:
         classified = evidence_package.get("classified_evidence", {})
         limitations = evidence_package.get("limitations", [])
         verdict = evidence_package.get("overall_assessment", "INCONCLUSIVE")
-        confidence = evidence_package.get("overall_confidence")
+        # Ordinal, not numeric. The former "Composite Confidence: 42.00%" was a
+        # mean of incomparable detector scores formatted as a probability.
+        evidence_strength = evidence_package.get("evidence_strength") or "NOT_ASSESSED"
 
         lines = [
             "# AIMD FORENSIC ANALYSIS REPORT",
@@ -49,7 +51,8 @@ class ReportGenerator:
             "## 1. Executive Summary & Verdict",
             "",
             f"- **Forensic Assessment:** **`{verdict}`**",
-            f"- **Composite Confidence:** `{confidence:.2%}`" if confidence is not None else "- **Composite Confidence:** `N/A`",
+            f"- **Evidence Strength:** `{evidence_strength}` "
+            "(ordinal support for the assessment -- not a probability)",
             f"- **Investigation Status:** `{case.get('analysis_status', 'COMPLETED')}`",
             f"- **Analysis ID:** `{case.get('analysis_id')}`",
             "",
@@ -60,10 +63,13 @@ class ReportGenerator:
                 "> **NOTICE [OBSERVATION]:** Forensic anomalies were identified above standard thresholds. "
                 "Review the detection signals and localized regions below for specific findings."
             )
-        elif verdict == "CLEAN":
+        elif verdict in ("NO_SIGNIFICANT_ANOMALIES_DETECTED", "CLEAN"):
             lines.append(
-                "> **NOTICE [OBSERVATION]:** No definitive manipulation signals exceeded detection thresholds. "
-                "Note: A 'CLEAN' assessment indicates absence of detected manipulation, not definitive proof of authenticity."
+                "> **NOTICE [OBSERVATION]:** No manipulation signals exceeded the "
+                "thresholds of the detectors that completed. This records what was "
+                "looked for and not found. It is NOT a finding of authenticity: "
+                "manipulation these detectors cannot measure, or that leaves no "
+                "measurable trace, would not appear here."
             )
         else:
             lines.append(

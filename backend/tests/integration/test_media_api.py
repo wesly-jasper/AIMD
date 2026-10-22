@@ -51,14 +51,16 @@ def test_upload_media():
 
     assert "media_id" in data
     assert "original_filename" in data
-    assert "stored_filename" in data
     assert "sha256" in data
-    assert "metadata" in data
+    # The upload response is a summary; internals such as the storage path and
+    # the extraction output stay server-side. Dimensions come from GET /media/{id}.
+    assert "file_path" not in data and "stored_filename" not in data
 
     assert data["original_filename"]=="test.jpg"
-    assert data["metadata"]["media_type"]=="image"
-    assert data["metadata"]["width"]==200
-    assert data["metadata"]["height"]==100
+    assert data["media_type"]=="image"
+    meta = client.get(f"/api/v1/media/{data['media_id']}").json()["metadata"]
+    assert meta["width"]==200
+    assert meta["height"]==100
 
 
 def test_upload_video(tmp_path):
@@ -83,36 +85,16 @@ def test_upload_video(tmp_path):
     data=response.json()
 
     assert "media_id" in data
-    assert "metadata" in data
-    assert "frames" in data
-    assert "keyframes" in data
+    assert "frames" not in data
 
     assert data["original_filename"]=="test.mp4"
-    assert data["metadata"]["media_type"]=="video"
-    assert data["metadata"]["width"]==200
-    assert data["metadata"]["height"]==100
+    assert data["media_type"]=="video"
+    meta = client.get(f"/api/v1/media/{data['media_id']}").json()["metadata"]
+    assert meta["width"]==200
+    assert meta["height"]==100
 
-    assert data["frames"] is not None
-    assert data["frames"]["frame_count"]==5
-    assert data["frames"]["saved_count"]==5
+    # Frames are still extracted at ingest; they are just not echoed back.
+    from app.core.config import settings
+    frames = list((settings.frames_dir / data["media_id"]).glob("*.jpg"))
+    assert len(frames) == 5
 
-    assert data["keyframes"] is not None
-    assert data["keyframes"]["total_frames"]==5
-    assert data["keyframes"]["keyframe_count"]==1
-
-    assert "fingerprint" in data
-    assert "keyframe_fingerprints" in data
-
-    assert data["fingerprint"] is not None
-    assert "sha256" in data["fingerprint"]
-
-    assert len(data["fingerprint"]["sha256"])==64
-
-    assert len(data["keyframe_fingerprints"])==1
-
-    assert "file" in data["keyframe_fingerprints"][0]
-    assert "phash" in data["keyframe_fingerprints"][0]
-
-    assert len(
-        data["keyframe_fingerprints"][0]["phash"]
-    )==64

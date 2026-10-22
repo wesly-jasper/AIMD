@@ -60,6 +60,11 @@ aimd.db
 backend/aimd.db
 backend/aimd.db-shm
 backend/aimd.db-wal
+# Timestamped copies taken before a destructive operation. They contain real
+# evidence rows and uploaded media, so they must never be committed.
+backend/aimd.db.bak-*
+backend/_pre_wipe_backup_*/
+backend/.last_wipe_backup
 
 # ── Media Ingestion & Processed Storage ────
 uploads/
@@ -101,8 +106,12 @@ backend/reports/
 
 # ── Node & Frontend ───────────────────────
 node_modules/
-frontend/node_modules/
-frontend/dist/
+web/node_modules/
+web/dist/
+*.tsbuildinfo
+
+# Files queued for deletion (see _to_delete/MANIFEST.md)
+_to_delete/
 dist-ssr/
 *.local
 npm-debug.log*

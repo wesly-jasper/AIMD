@@ -75,9 +75,13 @@ class TruForRunner:
                 else:
                     self.model = loaded_obj
 
-                if isinstance(self.model, torch.nn.Module):
-                    self.model.to(self.device)
-                    self.model.eval()
+                if not isinstance(self.model, torch.nn.Module):
+                    raise TypeError(
+                        "checkpoint contains weights but no compatible TruFor model architecture"
+                    )
+
+                self.model.to(self.device)
+                self.model.eval()
 
                 self.is_onnx = False
                 self.loaded = True
@@ -112,6 +116,7 @@ class TruForRunner:
 
         anomaly_map = None
         global_score = 0.0
+        has_global_score = False
 
         if self.is_onnx and self.onnx_session is not None:
             input_name = self.onnx_session.get_inputs()[0].name
@@ -123,6 +128,7 @@ class TruForRunner:
                 anomaly_map = out_tensor[0, 0] if out_tensor.shape[1] == 1 else np.mean(out_tensor[0], axis=0)
             elif out_tensor.ndim == 2:
                 global_score = float(1.0 / (1.0 + np.exp(-out_tensor[0, 0])))
+                has_global_score = True
                 anomaly_map = np.full((h, w), global_score, dtype=np.float32)
             else:
                 anomaly_map = np.squeeze(out_tensor)
@@ -140,6 +146,7 @@ class TruForRunner:
                         map_tensor = output[0]
                         if len(output) > 1 and isinstance(output[1], torch.Tensor) and output[1].numel() == 1:
                             global_score = float(torch.sigmoid(output[1]).cpu().item())
+                            has_global_score = True
                         anomaly_map = torch.sigmoid(map_tensor).squeeze().cpu().numpy()
                     elif isinstance(output, dict):
                         map_tensor = output.get('map', output.get('anomaly_map', output.get('mask')))
@@ -147,6 +154,7 @@ class TruForRunner:
                             anomaly_map = torch.sigmoid(map_tensor).squeeze().cpu().numpy()
                         if 'score' in output:
                             global_score = float(torch.sigmoid(output['score']).cpu().item())
+                            has_global_score = True
                     elif isinstance(output, torch.Tensor):
                         if output.ndim == 4:
                             anomaly_map = torch.sigmoid(output).squeeze().cpu().numpy()
@@ -155,16 +163,23 @@ class TruForRunner:
                             global_score = float(np.percentile(anomaly_map, 98))
                         elif output.numel() == 1:
                             global_score = float(torch.sigmoid(output).cpu().item())
+                            has_global_score = True
                             anomaly_map = np.full((h, w), global_score, dtype=np.float32)
                         else:
                             anomaly_map = torch.sigmoid(output).squeeze().cpu().numpy()
                             global_score = float(np.mean(anomaly_map))
                 else:
-                    global_score = 0.0
-                    anomaly_map = np.zeros((h, w), dtype=np.float32)
+                    raise TypeError("Loaded TruFor model is not a supported PyTorch module")
 
-        if anomaly_map is None or anomaly_map.size == 0:
-            anomaly_map = np.zeros((h, w), dtype=np.float32)
+        if anomaly_map is None:
+            if has_global_score:
+                anomaly_map = np.full((h, w), global_score, dtype=np.float32)
+            else:
+                raise ValueError(
+                    "TruFor model output does not contain a supported anomaly map or score"
+                )
+        if anomaly_map.size == 0:
+            raise ValueError("TruFor model output produced an empty anomaly map")
 
         if anomaly_map.shape != (h, w):
             anomaly_map = cv2.resize(anomaly_map.astype(np.float32), (w, h), interpolation=cv2.INTER_LINEAR)
@@ -201,14 +216,34 @@ class TruForRunner:
                 })
 
         return {
+            # A raw model score and the threshold it was compared against. The
+            # *label* is deliberately absent: this class runs a network and
+            # reports what came out of it, and whether that constitutes a finding
+            # is a question about the whole analysis, not about one tensor.
+            #
+            # It used to return ``'assessment': 'SUSPICIOUS' if
+            # manipulation_detected else 'CLEAN'`` -- a single sub-threshold raw
+            # score declaring an image clean, from inside the model wrapper,
+            # where nothing knows which other detectors ran or whether any of
+            # them failed. CLEAN is derived once, downstream, from the status
+            # fields.
             'manipulation_detected': manipulation_detected,
             'confidence': round(global_score, 4),
-            'assessment': 'SUSPICIOUS' if manipulation_detected else 'CLEAN',
             'regions': regions,
             'metadata': {
-                'status': 'MODEL_AVAILABLE',
+                # No 'status' key. It carried 'MODEL_AVAILABLE', a third status
+                # vocabulary beside DetectorAvailability and
+                # DetectorExecutionStatus, and the constant it was named after
+                # (app.core.constants.MODEL_AVAILABLE) held the different value
+                # "available" and was imported by nothing.
                 'device': str(self.device),
-                'model_path': str(self.model_path),
+                # The checkpoint's filename, not ``str(self.model_path)``. This
+                # metadata is passed through to the stored DetectorResult and
+                # into API responses and reports, so the absolute path it used to
+                # carry disclosed the host's directory layout to every client.
+                # The filename is the provenance an examiner needs: which
+                # checkpoint produced this score.
+                'model_file': self.model_path.name if self.model_path else None,
                 'anomaly_max': round(float(np.max(anomaly_map)), 4),
                 'anomaly_mean': round(float(np.mean(anomaly_map)), 4),
                 'regions_detected': len(regions),

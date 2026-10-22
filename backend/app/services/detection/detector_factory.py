@@ -1,3 +1,5 @@
+import logging
+
 from app.core.config import settings
 from app.services.detection.detectors.image.trufor_detector import (
     TruForDetector
@@ -14,28 +16,31 @@ from app.services.detection.detectors.image.copy_move_detector import CopyMoveDe
 from app.services.detection.detectors.image.manipulation_mask_generator import ManipulationMaskGenerator
 from app.services.detection.detectors.image.face_region_analyzer import FaceRegionAnalyzer
 
+logger = logging.getLogger(__name__)
+
 class DetectorFactory:
 
     @staticmethod
     def create_trufor():
-
         if not settings.trufor_enabled:
             return None
 
         if not settings.trufor_model_path:
-            raise ValueError(
-                "TruFor is enabled but model path is not configured"
+            return TruForDetector(
+                runner=None,
+                initialization_error="TruFor model path is not configured",
             )
 
-        runner=TruForRunner(
-            settings.trufor_model_path
-        )
-
-        runner.load()
-
-        return TruForDetector(
-            runner
-        )
+        try:
+            runner = TruForRunner(settings.trufor_model_path)
+            runner.load()
+            return TruForDetector(runner)
+        except Exception as exc:
+            logger.warning("TruFor initialization unavailable: %s", type(exc).__name__)
+            return TruForDetector(
+                runner=None,
+                initialization_error=f"TruFor initialization failed: {type(exc).__name__}",
+            )
 
     @staticmethod
     def create_forensic_image_detector():

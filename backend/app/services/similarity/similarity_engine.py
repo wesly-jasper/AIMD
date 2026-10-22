@@ -113,6 +113,7 @@ class SimilarityEngine:
         query_fingerprints: dict[str, str],  # {algorithm: value}
         db: Session,
         exclude_media_id: str | None = None,
+        owner: str | None = None,
     ) -> list[SimilarityMatch]:
         """
         Search stored fingerprints for similar media.
@@ -121,6 +122,8 @@ class SimilarityEngine:
             query_fingerprints: Dict of {algorithm: hash_value} for the query media.
             db: Database session.
             exclude_media_id: Media ID to exclude (e.g. the query itself).
+            owner: Only this account's media is compared. With no owner there is
+                nothing it may be compared against, so no local search runs.
 
         Returns:
             Ranked list of SimilarityMatch objects.
@@ -128,11 +131,13 @@ class SimilarityEngine:
         from app.db.repository import get_all_fingerprints
 
         matches: list[SimilarityMatch] = []
+        if not owner:
+            return matches
 
         # ── SHA-256 exact match ───────────────────────────────────────────────
         query_sha256 = query_fingerprints.get("sha256")
         if query_sha256:
-            stored = get_all_fingerprints(db, "sha256")
+            stored = get_all_fingerprints(db, "sha256", owner)
             for fp in stored:
                 if exclude_media_id and fp.media_id == exclude_media_id:
                     continue
@@ -149,7 +154,7 @@ class SimilarityEngine:
         # ── pHash perceptual match ────────────────────────────────────────────
         query_phash = query_fingerprints.get("phash")
         if query_phash:
-            stored = get_all_fingerprints(db, "phash")
+            stored = get_all_fingerprints(db, "phash", owner)
             for fp in stored:
                 if exclude_media_id and fp.media_id == exclude_media_id:
                     continue
@@ -167,7 +172,7 @@ class SimilarityEngine:
         # ── dHash perceptual match ────────────────────────────────────────────
         query_dhash = query_fingerprints.get("dhash")
         if query_dhash:
-            stored = get_all_fingerprints(db, "dhash")
+            stored = get_all_fingerprints(db, "dhash", owner)
             for fp in stored:
                 if exclude_media_id and fp.media_id == exclude_media_id:
                     continue
@@ -231,6 +236,7 @@ class SimilarityEngine:
         query_fingerprints: dict[str, str] | None = None,
         db: Session | None = None,
         exclude_media_id: str | None = None,
+        owner: str | None = None,
     ) -> dict[str, Any]:
         """
         Run full similarity search: local first, then external.
@@ -243,7 +249,7 @@ class SimilarityEngine:
         """
         local_matches: list[SimilarityMatch] = []
         if db is not None and query_fingerprints:
-            local_matches = self.search_local(query_fingerprints, db, exclude_media_id)
+            local_matches = self.search_local(query_fingerprints, db, exclude_media_id, owner)
 
         external_matches, provider_status = self.search_external(file_path)
 

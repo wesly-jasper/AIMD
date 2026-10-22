@@ -68,9 +68,31 @@ def test_invalid_confidence():
 def test_detection_request():
 
     request=DetectionRequest(
-        file_path="uploads/test.jpg",
-        media_type="image"
+        media_id="med-001"
     )
 
-    assert request.file_path=="uploads/test.jpg"
-    assert request.media_type=="image"
+    assert request.media_id=="med-001"
+
+
+def test_detection_request_rejects_empty_media_id():
+    try:
+        DetectionRequest(media_id="")
+        assert False
+    except ValueError:
+        assert True
+
+
+def test_detection_request_does_not_accept_a_filesystem_path():
+    """
+    Evidence is addressed by identity, not location.
+
+    A client-supplied path must not become a usable attribute: that was the root
+    of a confirmed arbitrary-file-read vulnerability.
+    """
+    request=DetectionRequest(
+        media_id="med-001",
+        file_path="C:/Windows/win.ini"
+    )
+
+    assert not hasattr(request,"file_path")
+    assert request.media_id=="med-001"

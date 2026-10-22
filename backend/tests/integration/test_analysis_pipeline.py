@@ -73,50 +73,26 @@ def test_full_pipeline_image():
     assert "detections" in get_data
     assert len(get_data["detections"]) > 0
 
-    # 4. Retrieve detection details
-    det_res = client.get(f"/api/v1/detection/{analysis_id}")
-    assert det_res.status_code == 200
-    det_data = det_res.json()
-    assert "detections" in det_data
-    assert len(det_data["detections"]) > 0
-    # Check that detectors have assessments
-    for d in det_data["detections"]:
-        assert d["assessment"] in ("CLEAN", "SUSPICIOUS", "INCONCLUSIVE", "UNAVAILABLE")
+    # 4. The analysis payload carries the per-detector contract and the record.
+    for d in get_data["detections"]:
+        assert d["availability"] in ("AVAILABLE", "UNAVAILABLE")
+        assert d["execution_status"] in ("COMPLETED", "INCONCLUSIVE", "FAILED", "SKIPPED")
+    assert get_data["assessment_detail"]["category"] == get_data["assessment"]
 
-    # 5. Retrieve source tracing
-    src_res = client.get(f"/api/v1/source/{analysis_id}")
-    assert src_res.status_code == 200
-    src_data = src_res.json()
-    assert "provider_status" in src_data
-    assert "candidates" in src_data
+    # 5. Stages with no route of their own still persisted their output.
+    _assert_stage_records(analysis_id)
 
-    # 6. Retrieve provenance graph
-    prov_res = client.get(f"/api/v1/provenance/{analysis_id}")
-    assert prov_res.status_code == 200
-    prov_data = prov_res.json()
-    assert "nodes" in prov_data
-    assert "edges" in prov_data
-    assert len(prov_data["nodes"]) >= 1
 
-    # 7. Retrieve evidence package
-    ev_res = client.get(f"/api/v1/evidence/{analysis_id}")
-    assert ev_res.status_code == 200
-    ev_data = ev_res.json()
-    assert "case_information" in ev_data
-    assert "media_evidence" in ev_data
-    assert ev_data["media_evidence"]["evidence_category"] == "FACT"
-    assert "classified_evidence" in ev_data
-    assert "FACT" in ev_data["classified_evidence"]
-    assert "limitations" in ev_data
-    assert len(ev_data["limitations"]) > 0
+def _assert_stage_records(analysis_id: str) -> None:
+    from app.db import repository as repo
+    from app.db.database import SessionLocal
 
-    # 8. Retrieve forensic report
-    rep_res = client.get(f"/api/v1/report/{analysis_id}")
-    assert rep_res.status_code == 200
-    rep_data = rep_res.json()
-    assert "json" in rep_data
-    assert "markdown" in rep_data
-    assert "# AIMD FORENSIC ANALYSIS REPORT" in rep_data["markdown"]
+    with SessionLocal() as db:
+        provenance = repo.get_provenance_for_analysis(db, analysis_id)
+        assert len(provenance["nodes"]) >= 1
+        report = repo.get_report_for_analysis(db, analysis_id)
+        assert report is not None
+        assert "AIMD FORENSIC ANALYSIS REPORT" in report.markdown_report
 
 
 def test_full_pipeline_video(tmp_path):
@@ -141,12 +117,9 @@ def test_full_pipeline_video(tmp_path):
     assert analysis_res.status_code == 200
     analysis_id = analysis_res.json()["analysis_id"]
 
-    # 3. Check report generated
-    rep_res = client.get(f"/api/v1/report/{analysis_id}")
-    assert rep_res.status_code == 200
-    rep_data = rep_res.json()
-    assert "markdown" in rep_data
-    assert len(rep_data["markdown"]) > 100
+    # 3. Check the analysis and its stored record
+    assert client.get(f"/api/v1/analysis/{analysis_id}").status_code == 200
+    _assert_stage_records(analysis_id)
 
 
 def test_full_pipeline_audio(tmp_path):
@@ -192,14 +165,7 @@ def test_full_pipeline_audio(tmp_path):
     assert get_data["media_id"] == media_id
     assert get_data["status"] in ("COMPLETED", "PARTIAL")
 
-    # 4. Check evidence & report
-    ev_res = client.get(f"/api/v1/evidence/{analysis_id}")
-    assert ev_res.status_code == 200
-    ev_data = ev_res.json()
-    assert ev_data["media_evidence"]["media_type"] == "audio"
-
-    rep_res = client.get(f"/api/v1/report/{analysis_id}")
-    assert rep_res.status_code == 200
-    rep_data = rep_res.json()
-    assert "AIMD FORENSIC ANALYSIS REPORT" in rep_data["markdown"]
+    # 4. Check the stored record
+    assert get_data["media_type"] == "audio"
+    _assert_stage_records(analysis_id)
 

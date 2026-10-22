@@ -10,7 +10,7 @@ from typing import Optional
 
 from sqlalchemy import (
     Boolean, DateTime, Float, ForeignKey, Integer,
-    String, Text, JSON, Enum as SAEnum
+    String, Text, JSON, UniqueConstraint,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship as sa_relationship
 
@@ -25,6 +25,39 @@ def _uuid() -> str:
     return str(uuid.uuid4())
 
 
+# ── Users ─────────────────────────────────────────────────────────────────────
+
+class UserRecord(Base):
+    """
+    An account. Previously held only in process memory, so a user registered at
+    runtime vanished on restart and existed on one worker only.
+    """
+    __tablename__ = "users"
+
+    username: Mapped[str] = mapped_column(String(150), primary_key=True)
+    email: Mapped[Optional[str]] = mapped_column(String(254))
+    hashed_password: Mapped[str] = mapped_column(String, nullable=False)
+    role: Mapped[str] = mapped_column(String, nullable=False)  # admin | investigator
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
+# ── Cases ─────────────────────────────────────────────────────────────────────
+
+class CaseRecord(Base):
+    """An investigation grouping evidence items under one reference."""
+    __tablename__ = "cases"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=_uuid)
+    title: Mapped[str] = mapped_column(String(300), nullable=False)
+    description: Mapped[Optional[str]] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(String, nullable=False, default="OPEN")  # OPEN | CLOSED
+    created_by: Mapped[Optional[str]] = mapped_column(String(150))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+    media: Mapped[list["MediaRecord"]] = sa_relationship(back_populates="case")
+
+
 # ── Media ─────────────────────────────────────────────────────────────────────
 
 class MediaRecord(Base):
@@ -32,6 +65,12 @@ class MediaRecord(Base):
     __tablename__ = "media"
 
     id: Mapped[str] = mapped_column(String, primary_key=True, default=_uuid)
+    # Nullable because evidence ingested before cases existed has none. RESTRICT,
+    # not CASCADE: deleting a case must never silently delete its evidence.
+    case_id: Mapped[Optional[str]] = mapped_column(
+        String, ForeignKey("cases.id", ondelete="RESTRICT"), index=True
+    )
+    uploaded_by: Mapped[Optional[str]] = mapped_column(String(150))
     original_filename: Mapped[str] = mapped_column(String, nullable=False)
     stored_filename: Mapped[str] = mapped_column(String, nullable=False)
     file_path: Mapped[str] = mapped_column(String, nullable=False)
@@ -42,6 +81,7 @@ class MediaRecord(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
     # Relationships
+    case: Mapped[Optional["CaseRecord"]] = sa_relationship(back_populates="media")
     analyses: Mapped[list["AnalysisRecord"]] = sa_relationship(
         back_populates="media", cascade="all, delete-orphan"
     )
@@ -101,14 +141,46 @@ class AnalysisRecord(Base):
     status: Mapped[str] = mapped_column(
         String, nullable=False, default="QUEUED"
     )  # QUEUED|PROCESSING|COMPLETED|FAILED|PARTIAL|INCONCLUSIVE
-    assessment: Mapped[Optional[str]] = mapped_column(String)  # CLEAN|SUSPICIOUS|INCONCLUSIVE
-    overall_confidence: Mapped[Optional[float]] = mapped_column(Float)
+    # NO_SIGNIFICANT_ANOMALIES_DETECTED | SUSPICIOUS | LIKELY_MANIPULATED
+    # | LIKELY_AI_GENERATED | INCONCLUSIVE
+    assessment: Mapped[Optional[str]] = mapped_column(String)
+
+    # Ordinal support for the assessment: NONE|WEAK|MODERATE|STRONG|CONTRADICTORY.
+    # Not a probability and not comparable across analyses as a magnitude.
+    evidence_strength: Mapped[Optional[str]] = mapped_column(String)
+
+    # ``overall_confidence`` -- a weighted mean of incomparable detector scores --
+    # was dropped by migration b7e1f0c2d9a4. See that migration for why.
     error_message: Mapped[Optional[str]] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
     completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
 
+    # ── Run provenance ────────────────────────────────────────────────────────
+    # What produced this result. Without these, two analyses of the same file
+    # that disagree cannot be explained: the detectors, their versions or the
+    # configuration may have changed between them. All are NULL on runs recorded
+    # before they existed -- deliberately not backfilled, since the values in
+    # force at the time are unknown.
+    requested_by: Mapped[Optional[str]] = mapped_column(String(150))
+    software_version: Mapped[Optional[str]] = mapped_column(String)
+    # sha256 over the sorted (detector, version) pairs that were constructed.
+    detector_set_version: Mapped[Optional[str]] = mapped_column(String(64))
+    # The analysis-relevant settings, never credentials -- see
+    # AnalysisPipeline._config_snapshot for the allow-list.
+    config_snapshot: Mapped[Optional[dict]] = mapped_column(JSON)
+    duration_ms: Mapped[Optional[int]] = mapped_column(Integer)
+
     # Relationships
     media: Mapped["MediaRecord"] = sa_relationship(back_populates="analyses")
+    observations: Mapped[list["ObservationRecord"]] = sa_relationship(
+        back_populates="analysis", cascade="all, delete-orphan"
+    )
+    findings: Mapped[list["FindingRecord"]] = sa_relationship(
+        back_populates="analysis", cascade="all, delete-orphan"
+    )
+    assessment_record: Mapped[Optional["AssessmentRecord"]] = sa_relationship(
+        back_populates="analysis", cascade="all, delete-orphan", uselist=False
+    )
     detections: Mapped[list["DetectionRecord"]] = sa_relationship(
         back_populates="analysis", cascade="all, delete-orphan"
     )
@@ -171,10 +243,33 @@ class DetectionRecord(Base):
     detector_version: Mapped[Optional[str]] = mapped_column(String)
     media_type: Mapped[str] = mapped_column(String, nullable=False)
     manipulation_type: Mapped[str] = mapped_column(String, nullable=False)
-    # CLEAN | SUSPICIOUS | INCONCLUSIVE | UNAVAILABLE
+    # Availability and execution are INDEPENDENT facts and are stored separately.
+    # A detector may be AVAILABLE and FAILED, or COMPLETED and INCONCLUSIVE.
+    # Collapsing them loses the difference between "we lack this capability",
+    # "our capability is broken", and "it ran and found nothing" -- which have
+    # different remedies and different meaning for the evidence.
+    availability: Mapped[str] = mapped_column(
+        String, nullable=False, default="AVAILABLE"
+    )  # AVAILABLE | UNAVAILABLE
+    execution_status: Mapped[str] = mapped_column(
+        String, nullable=False, default="COMPLETED"
+    )  # COMPLETED | INCONCLUSIVE | FAILED | SKIPPED
+
+    # Why the detector was unavailable / failed / skipped.
+    status_reason: Mapped[Optional[str]] = mapped_column(Text)
+
+    # DEPRECATED detector-level label, derived from the two fields above.
+    # Retained until consumers are migrated off it.
     assessment: Mapped[str] = mapped_column(String, nullable=False, default="INCONCLUSIVE")
     manipulation_detected: Mapped[Optional[bool]] = mapped_column(Boolean)
     confidence: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+
+    # How to read `confidence`. Without this the number is uninterpretable: a raw
+    # model score, a calibrated probability and a heuristic severity are not
+    # comparable and must not be presented on a shared scale.
+    score_semantics: Mapped[str] = mapped_column(
+        String, nullable=False, default="HEURISTIC_SEVERITY"
+    )
     detector_metadata: Mapped[Optional[dict]] = mapped_column(JSON)
     # For video: suspicious segments
     suspicious_segments: Mapped[Optional[list]] = mapped_column(JSON)
@@ -350,3 +445,134 @@ class ReportRecord(Base):
     generated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
     analysis: Mapped["AnalysisRecord"] = sa_relationship(back_populates="report")
+
+
+# ── Observations, findings, assessment ────────────────────────────────────────
+#
+# These three were previously conflated in ``evidence_items`` (free text with a
+# category) and two columns on ``analyses``. Separating them is what lets a
+# conclusion be traced back to the measurements it rests on:
+#
+#   detection  -- a detector was invoked; did it run, and how?
+#   observation-- one thing a detector that ran actually measured
+#   finding    -- a statement, linked to the observations that SUPPORT it and,
+#                 just as explicitly, to the ones that CONTRADICT it
+#   assessment -- the analysis-level category, with the rule and rationale that
+#                 produced it and the coverage gaps it was produced despite
+#
+# A detector that was UNAVAILABLE, FAILED or SKIPPED produces no observation.
+# It is a coverage gap, recorded on the assessment, never a negative result.
+
+class ObservationRecord(Base):
+    __tablename__ = "observations"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=_uuid)
+    analysis_id: Mapped[str] = mapped_column(
+        String, ForeignKey("analyses.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    detection_id: Mapped[str] = mapped_column(
+        String, ForeignKey("detections.id", ondelete="CASCADE"), nullable=False
+    )
+    detector: Mapped[str] = mapped_column(String, nullable=False)
+    # Detectors sharing a physical basis are not independent corroboration.
+    signal_family: Mapped[str] = mapped_column(String, nullable=False)
+    # ANOMALY_OBSERVED | NO_ANOMALY_OBSERVED | INDETERMINATE
+    polarity: Mapped[str] = mapped_column(String, nullable=False)
+    score: Mapped[Optional[float]] = mapped_column(Float)
+    score_semantics: Mapped[str] = mapped_column(String, nullable=False)
+    localised: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    description: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+    analysis: Mapped["AnalysisRecord"] = sa_relationship(back_populates="observations")
+
+
+class FindingRecord(Base):
+    __tablename__ = "findings"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=_uuid)
+    analysis_id: Mapped[str] = mapped_column(
+        String, ForeignKey("analyses.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    statement: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+    analysis: Mapped["AnalysisRecord"] = sa_relationship(back_populates="findings")
+    links: Mapped[list["FindingObservationRecord"]] = sa_relationship(
+        back_populates="finding", cascade="all, delete-orphan"
+    )
+
+
+class FindingObservationRecord(Base):
+    """An observation's bearing on a finding: SUPPORTS or CONTRADICTS."""
+    __tablename__ = "finding_observations"
+
+    finding_id: Mapped[str] = mapped_column(
+        String, ForeignKey("findings.id", ondelete="CASCADE"), primary_key=True
+    )
+    observation_id: Mapped[str] = mapped_column(
+        String, ForeignKey("observations.id", ondelete="CASCADE"), primary_key=True
+    )
+    relation: Mapped[str] = mapped_column(String, nullable=False)  # SUPPORTS | CONTRADICTS
+
+    finding: Mapped["FindingRecord"] = sa_relationship(back_populates="links")
+
+
+class AssessmentRecord(Base):
+    __tablename__ = "assessments"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=_uuid)
+    analysis_id: Mapped[str] = mapped_column(
+        String, ForeignKey("analyses.id", ondelete="CASCADE"), nullable=False, unique=True
+    )
+    category: Mapped[str] = mapped_column(String, nullable=False)
+    evidence_strength: Mapped[str] = mapped_column(String, nullable=False)
+    # Stable identifier of the decision rule that fired, so the logic behind a
+    # stored assessment can be found even after the wording of `rationale` changes.
+    rule: Mapped[str] = mapped_column(String, nullable=False)
+    rationale: Mapped[str] = mapped_column(Text, nullable=False)
+    # Detection ids that produced no observation (UNAVAILABLE / FAILED / SKIPPED).
+    coverage_gaps: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+    analysis: Mapped["AnalysisRecord"] = sa_relationship(back_populates="assessment_record")
+
+
+# ── Audit trail ───────────────────────────────────────────────────────────────
+
+class AuditEventRecord(Base):
+    """
+    One entry in a hash-linked, append-only audit trail.
+
+    ``event_hash`` is sha256 over the canonical serialisation of this event's
+    fields *including* ``previous_event_hash``, so altering, deleting or
+    reordering any earlier event breaks every hash after it. See
+    app.services.audit.audit_log for the canonical form and the verifier.
+
+    The subject ids are plain indexed strings, deliberately NOT foreign keys: an
+    audit record must outlive the thing it describes, and a cascading FK would
+    delete the record of a deletion along with its subject.
+
+    ``occurred_at`` is stored as the exact ISO-8601 string that was hashed. A
+    DateTime column would not round-trip byte-for-byte on every backend (SQLite
+    drops the timezone), and verification would then fail on untampered rows.
+    """
+    __tablename__ = "audit_events"
+    __table_args__ = (
+        # Two writers that both read the same chain head would otherwise fork the
+        # chain silently. With these, the second insert fails and is retried.
+        UniqueConstraint("sequence", name="uq_audit_events_sequence"),
+        UniqueConstraint("previous_event_hash", name="uq_audit_events_previous_hash"),
+    )
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=_uuid)
+    sequence: Mapped[int] = mapped_column(Integer, nullable=False)
+    occurred_at: Mapped[str] = mapped_column(String(40), nullable=False)
+    actor: Mapped[str] = mapped_column(String(150), nullable=False)
+    action: Mapped[str] = mapped_column(String, nullable=False)
+    case_id: Mapped[Optional[str]] = mapped_column(String, index=True)
+    media_id: Mapped[Optional[str]] = mapped_column(String, index=True)
+    analysis_id: Mapped[Optional[str]] = mapped_column(String, index=True)
+    details: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    previous_event_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    event_hash: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)

@@ -11,7 +11,13 @@ import cv2
 import numpy as np
 from PIL import Image
 
-from app.schemas.detection import DetectionResult, DetectionRegion, Assessment
+from app.schemas.detection import (
+    DetectionRegion,
+    DetectionResult,
+    DetectorAvailability,
+    DetectorExecutionStatus,
+    ScoreSemantics,
+)
 from app.services.detection.detectors.base_detector import BaseDetector
 
 logger = logging.getLogger(__name__)
@@ -28,6 +34,11 @@ class FaceRegionAnalyzer(BaseDetector):
     - Face boundaries (blending artifacts, edge consistency)
     - Forehead/cheeks (smoothness, unnatural symmetry)
     """
+
+    detector_id = "FaceRegionAnalyzer"
+    version = "1.0.0"
+    supported_media_types = frozenset({"image"})
+    manipulation_type = "deepfake"
 
     # Facial landmark indices (MediaPipe 468 landmarks)
     FACE_REGIONS = {
@@ -52,6 +63,7 @@ class FaceRegionAnalyzer(BaseDetector):
         frequency_analysis: bool = True,
         texture_analysis: bool = True,
         boundary_analysis: bool = True,
+        model_path: Optional[str | Path] = None,
     ):
         self.use_mediapipe = use_mediapipe
         self.min_face_size = min_face_size
@@ -72,24 +84,73 @@ class FaceRegionAnalyzer(BaseDetector):
         self.texture_analysis = texture_analysis
         self.boundary_analysis = boundary_analysis
 
-        self._face_mesh = None
+        self._mp = None
+        self._face_landmarker = None
+        self._initialization_error = None
+        self.model_path = (
+            Path(model_path)
+            if model_path is not None
+            else Path(__file__).resolve().parents[5] / "models" / "face_landmarker.task"
+        )
         if use_mediapipe:
             self._init_mediapipe()
+        else:
+            self._initialization_error = "MediaPipe face-region detection is disabled"
 
     def _init_mediapipe(self):
-        """Initialize MediaPipe Face Mesh."""
+        """Initialize the supported MediaPipe Tasks Face Landmarker API."""
         try:
             import mediapipe as mp
-            self._mp_face_mesh = mp.solutions.face_mesh.FaceMesh(
-                static_image_mode=True,
-                max_num_faces=5,
-                refine_landmarks=True,
-                min_detection_confidence=0.5,
+        except ImportError:
+            self._initialization_error = "MediaPipe Tasks dependency is not installed"
+            logger.warning(self._initialization_error)
+            return
+
+        if not self.model_path.is_file():
+            self._initialization_error = "Face Landmarker model asset is missing"
+            logger.warning(self._initialization_error)
+            return
+
+        try:
+            vision = mp.tasks.vision
+            options = vision.FaceLandmarkerOptions(
+                base_options=mp.tasks.BaseOptions(model_asset_path=str(self.model_path)),
+                running_mode=vision.RunningMode.IMAGE,
+                num_faces=5,
+                min_face_detection_confidence=0.5,
+                min_face_presence_confidence=0.5,
                 min_tracking_confidence=0.5,
             )
-        except ImportError:
-            logger.warning("MediaPipe not available, falling back to OpenCV Haar")
-            self.use_mediapipe = False
+            self._face_landmarker = vision.FaceLandmarker.create_from_options(options)
+            self._mp = mp
+        except Exception as exc:
+            self._initialization_error = (
+                f"MediaPipe Tasks initialization failed ({type(exc).__name__})"
+            )
+            logger.warning("%s: %s", self._initialization_error, exc)
+
+    def availability(self) -> tuple[DetectorAvailability, Optional[str]]:
+        """
+        Whether the MediaPipe Face Landmarker actually loaded.
+
+        Three separate things can be absent -- the mediapipe package, the
+        ``face_landmarker.task`` model asset, and a working Tasks runtime -- and
+        ``_init_mediapipe`` records which. Being switched off by configuration is
+        NOT an absent capability; see ``detect``.
+        """
+        if self._face_landmarker is not None:
+            return DetectorAvailability.AVAILABLE, None
+        return (
+            DetectorAvailability.UNAVAILABLE,
+            self._initialization_error or "Face Landmarker is unavailable",
+        )
+
+    def close(self) -> None:
+        """Release the MediaPipe Tasks resources when the analyzer is disposed."""
+        landmarker = self._face_landmarker
+        self._face_landmarker = None
+        if landmarker is not None:
+            landmarker.close()
 
     def detect(self, file_path: str) -> DetectionResult:
         path = Path(file_path)
@@ -104,11 +165,37 @@ class FaceRegionAnalyzer(BaseDetector):
             h, w = img.shape[:2]
             rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
 
+            if self._face_landmarker is None:
+                if not self.use_mediapipe:
+                    # Switched off by configuration. The capability is present;
+                    # it was deliberately not attempted. Reporting this as
+                    # UNAVAILABLE would make an operator's own choice look like a
+                    # missing dependency.
+                    return self.skipped(
+                        self._initialization_error
+                        or "MediaPipe face-region detection is disabled"
+                    )
+                return self.unavailable(
+                    self._initialization_error or "Face Landmarker is unavailable"
+                )
+
             # Detect faces and landmarks
-            faces = self._detect_faces(rgb, (w, h))
+            try:
+                faces = self._detect_faces(rgb, (w, h))
+            except Exception as exc:
+                logger.warning("MediaPipe Tasks face detection failed: %s", exc)
+                # The landmarker loaded and the call broke: AVAILABLE + FAILED.
+                # This was UNAVAILABLE, which hid a runtime defect behind what
+                # read as a deployment gap.
+                return self.failed(
+                    f"MediaPipe Tasks face detection failed ({type(exc).__name__})"
+                )
 
             if not faces:
-                return self._inconclusive("No faces detected")
+                return self.inconclusive(
+                    "No faces detected; no face-region observation possible",
+                    metadata={"status": "no_faces_detected", "faces_detected": 0},
+                )
 
             all_regions = []
             face_scores = []
@@ -130,17 +217,33 @@ class FaceRegionAnalyzer(BaseDetector):
                     face_score = weighted_score / total_weight if total_weight > 0 else 0.0
                     face_scores.append(face_score)
 
+            if not all_regions or not face_scores:
+                return self.inconclusive(
+                    "Face detected but no facial regions could be analyzed",
+                    metadata={
+                        "status": "active_face_region_analysis",
+                        "faces_detected": len(faces),
+                        "regions_analyzed": len(all_regions),
+                    },
+                )
+
             # Overall confidence
             max_conf = max(face_scores) if face_scores else 0.0
             manipulation_detected = max_conf >= 0.55
 
             return DetectionResult(
-                detector="FaceRegionAnalyzer",
+                detector=self.detector_id,
+                detector_version=self.version,
                 media_type="image",
                 manipulation_detected=manipulation_detected,
                 confidence=round(max_conf, 4),
-                manipulation_type="deepfake",
-                assessment=Assessment.SUSPICIOUS if manipulation_detected else Assessment.CLEAN,
+                manipulation_type=self.manipulation_type,
+                availability=DetectorAvailability.AVAILABLE,
+                execution_status=DetectorExecutionStatus.COMPLETED,
+                # A weighted mean of hand-tuned per-region heuristics. The weights
+                # were chosen by judgement, not fitted, so this is ordinal
+                # severity and not a probability that the face is synthetic.
+                score_semantics=ScoreSemantics.HEURISTIC_SEVERITY,
                 regions=all_regions,
                 metadata={
                     "status": "active_face_region_analysis",
@@ -154,43 +257,36 @@ class FaceRegionAnalyzer(BaseDetector):
 
         except Exception as e:
             logger.warning(f"FaceRegionAnalyzer failed: {e}")
-            return self._inconclusive(str(e))
+            # AVAILABLE + FAILED: the landmarker is loaded and the analysis broke.
+            return self.failed(f"Face-region analysis failed: {type(e).__name__}")
 
     def _detect_faces(self, rgb: np.ndarray, img_size: Tuple[int, int]) -> List[Dict]:
         """Detect faces and extract landmarks."""
         w, h = img_size
         faces = []
+        mp_image = self._mp.Image(
+            image_format=self._mp.ImageFormat.SRGB,
+            data=rgb,
+        )
+        results = self._face_landmarker.detect(mp_image)
+        for face_landmarks in results.face_landmarks:
+            landmarks = [
+                (
+                    min(max(int(point.x * w), 0), w - 1),
+                    min(max(int(point.y * h), 0), h - 1),
+                )
+                for point in face_landmarks
+            ]
+            if not landmarks:
+                continue
 
-        if self.use_mediapipe and self._mp_face_mesh:
-            results = self._mp_face_mesh.process(rgb)
-            if results.multi_face_landmarks:
-                for face_landmarks in results.multi_face_landmarks:
-                    # Convert landmarks to pixel coordinates
-                    landmarks = []
-                    for lm in face_landmarks.landmark:
-                        x = int(lm.x * w)
-                        y = int(lm.y * h)
-                        landmarks.append((x, y))
-
-                    # Compute face bbox
-                    xs, ys = zip(*landmarks)
-                    x1, x2 = max(0, min(xs)), min(w, max(xs))
-                    y1, y2 = max(0, min(ys)), min(h, max(ys))
-
-                    if (x2 - x1) >= self.min_face_size and (y2 - y1) >= self.min_face_size:
-                        faces.append({
-                            "landmarks": np.array(landmarks),
-                            "bbox": [float(x1), float(y1), float(x2 - x1), float(y2 - y1)],
-                        })
-        else:
-            # Fallback to Haar cascade
-            gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
-            face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
-            detected = face_cascade.detectMultiScale(gray, 1.1, 5, minSize=(self.min_face_size, self.min_face_size))
-            for (x, y, w_f, h_f) in detected:
+            points = np.asarray(landmarks)
+            x1, y1 = points.min(axis=0)
+            x2, y2 = points.max(axis=0)
+            if (x2 - x1) >= self.min_face_size and (y2 - y1) >= self.min_face_size:
                 faces.append({
-                    "landmarks": None,
-                    "bbox": [float(x), float(y), float(w_f), float(h_f)],
+                    "landmarks": points,
+                    "bbox": [float(x1), float(y1), float(x2 - x1), float(y2 - y1)],
                 })
 
         return faces
@@ -500,18 +596,9 @@ class FaceRegionAnalyzer(BaseDetector):
             types.append("mouth_specific")
         return types
 
-    def _inconclusive(self, reason: str) -> DetectionResult:
-        return DetectionResult(
-            detector="FaceRegionAnalyzer",
-            media_type="image",
-            manipulation_detected=False,
-            confidence=0.0,
-            manipulation_type="deepfake",
-            assessment=Assessment.INCONCLUSIVE,
-            regions=[],
-            metadata={
-                "assessment": "INCONCLUSIVE",
-                "reason": reason,
-                "note": f"UNCERTAINTY: Face region analysis unavailable - {reason}",
-            },
-        )
+    # `_inconclusive` and `_unavailable` were removed here. The local
+    # `_unavailable` was carrying three different situations -- the landmarker
+    # never loaded, the landmarker call crashed, and the analysis crashed -- all
+    # under one label, and its note text said "unavailable" for every one of
+    # them. They are now `unavailable()`, `failed()` and `skipped()` on
+    # BaseDetector, which cannot be conflated.

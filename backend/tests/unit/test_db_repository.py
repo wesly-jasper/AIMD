@@ -40,8 +40,8 @@ def test_media_crud(db):
     assert by_hash is not None
     assert by_hash.id == "med-001"
 
-    media_list = repo.list_media(db)
-    assert len(media_list) == 1
+    # Unowned rows belong to no account, so no owner's list includes them.
+    assert repo.list_owned_media(db, "anyone@example.test") == []
 
 
 def test_media_metadata_upsert(db):
@@ -97,14 +97,19 @@ def test_analysis_lifecycle(db):
         "ana-001",
         status="COMPLETED",
         assessment="SUSPICIOUS",
-        confidence=0.88,
+        evidence_strength="MODERATE",
     )
 
     updated = repo.get_analysis(db, "ana-001")
     assert updated.status == "COMPLETED"
     assert updated.assessment == "SUSPICIOUS"
-    assert updated.overall_confidence == 0.88
     assert updated.completed_at is not None
+
+    # Evidence strength is ordinal. The former numeric `confidence` was a mean of
+    # incomparable detector scores; the repository no longer accepts it.
+    assert updated.evidence_strength == "MODERATE"
+    # And the column that held it is gone from the model, not merely unwritten.
+    assert not hasattr(updated, "overall_confidence")
 
 
 def test_detection_and_regions(db):
@@ -167,7 +172,6 @@ def test_provenance_and_evidence(db):
         "media_id": "med-005",
         "status": "COMPLETED",
         "assessment": "CLEAN",
-        "overall_confidence": 0.05,
     })
 
     # Provenance

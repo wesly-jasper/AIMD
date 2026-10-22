@@ -10,7 +10,13 @@ from typing import List, Tuple, Optional
 import cv2
 import numpy as np
 
-from app.schemas.detection import DetectionResult, DetectionRegion, Assessment
+from app.schemas.detection import (
+    DetectionRegion,
+    DetectionResult,
+    DetectorAvailability,
+    DetectorExecutionStatus,
+    ScoreSemantics,
+)
 from app.services.detection.detectors.base_detector import BaseDetector
 
 logger = logging.getLogger(__name__)
@@ -49,9 +55,16 @@ class CopyMoveDetector(BaseDetector):
         else:
             raise ValueError(f"Unsupported detector type: {detector_type}")
 
+    detector_id = "CopyMoveDetector"
+    version = "1.0.0"
+    supported_media_types = frozenset({"image"})
+    manipulation_type = "copy_move"
+
     def detect(self, file_path: str) -> DetectionResult:
         path = Path(file_path)
         if not path.exists():
+            # A missing evidence file is a caller error, not a detector outcome,
+            # and raising keeps it from being recorded as a forensic result.
             raise FileNotFoundError(f"File not found: {file_path}")
 
         try:
@@ -66,31 +79,36 @@ class CopyMoveDetector(BaseDetector):
             keypoints, descriptors = self.detector.detectAndCompute(gray, None)
 
             if descriptors is None or len(keypoints) < 10:
-                return self._inconclusive("Insufficient keypoints detected")
+                return self.inconclusive("Insufficient keypoints detected")
 
             # Match descriptors against themselves (find duplicated regions)
             matches = self._match_descriptors(descriptors, keypoints)
 
             if len(matches) < self.min_inliers:
-                return self._inconclusive("Insufficient reliable matches for copy-move detection")
+                return self.inconclusive("Insufficient reliable matches for copy-move detection")
 
             # Cluster matches to find copied regions
             regions = self._cluster_matches(matches, keypoints, (w, h))
 
             if not regions:
-                return self._inconclusive("No copy-move regions identified after clustering")
+                return self.inconclusive("No copy-move regions identified after clustering")
 
             # Compute overall confidence
             max_conf = max(r.confidence for r in regions)
             manipulation_detected = max_conf >= 0.50
 
             return DetectionResult(
-                detector="CopyMoveDetector",
+                detector=self.detector_id,
+                detector_version=self.version,
                 media_type="image",
                 manipulation_detected=manipulation_detected,
                 confidence=round(max_conf, 4),
-                manipulation_type="copy_move",
-                assessment=Assessment.SUSPICIOUS if manipulation_detected else Assessment.CLEAN,
+                manipulation_type=self.manipulation_type,
+                availability=DetectorAvailability.AVAILABLE,
+                execution_status=DetectorExecutionStatus.COMPLETED,
+                # Derived from RANSAC inlier counts and cluster geometry, not from
+                # a trained model. Ordinal severity, not a probability.
+                score_semantics=ScoreSemantics.HEURISTIC_SEVERITY,
                 regions=regions,
                 metadata={
                     "status": "active_copy_move_detection",
@@ -104,7 +122,8 @@ class CopyMoveDetector(BaseDetector):
 
         except Exception as e:
             logger.warning(f"CopyMoveDetector failed: {e}")
-            return self._inconclusive(str(e))
+            # AVAILABLE + FAILED: SIFT/ORB are present and the run broke.
+            return self.failed(f"Copy-move analysis failed: {type(e).__name__}")
 
     def _match_descriptors(
         self, descriptors: np.ndarray, keypoints: List[cv2.KeyPoint]
@@ -259,18 +278,7 @@ class CopyMoveDetector(BaseDetector):
         regions.sort(key=lambda r: r.confidence, reverse=True)
         return regions[:10]  # Top 10 regions
 
-    def _inconclusive(self, reason: str) -> DetectionResult:
-        return DetectionResult(
-            detector="CopyMoveDetector",
-            media_type="image",
-            manipulation_detected=False,
-            confidence=0.0,
-            manipulation_type="copy_move",
-            assessment=Assessment.INCONCLUSIVE,
-            regions=[],
-            metadata={
-                "assessment": "INCONCLUSIVE",
-                "reason": reason,
-                "note": f"UNCERTAINTY: Copy-move detection unavailable - {reason}",
-            },
-        )
+    # `_inconclusive` and `_unavailable` were removed here: both are now on
+    # BaseDetector, where `unavailable()` (capability absent) and `failed()`
+    # (capability present, run broke) are separate statuses. The old local
+    # `_unavailable` was used for a crash, which is `failed()`.

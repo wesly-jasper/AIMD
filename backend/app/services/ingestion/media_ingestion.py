@@ -110,13 +110,21 @@ class MediaIngestionService:
     def generate_sha256(self, data: bytes) -> str:
         return hashlib.sha256(data).hexdigest()
 
-    async def ingest(self, file: UploadFile, db: Session | None = None) -> dict:
+    async def ingest(
+        self,
+        file: UploadFile,
+        db: Session | None = None,
+        case_id: str | None = None,
+        uploaded_by: str | None = None,
+    ) -> dict:
         """
         Validate, store, and persist a media file.
 
         Args:
             file: Uploaded file from FastAPI.
             db: Optional DB session. If provided, media record is persisted.
+            case_id: Case the evidence belongs to; must already exist.
+            uploaded_by: Username of the authenticated uploader.
 
         Returns:
             Dict with media_id, sha256, file_path, metadata, and status.
@@ -230,7 +238,10 @@ class MediaIngestionService:
                     "media_type": media_type,
                     "size_bytes": len(data),
                     "sha256": sha256,
+                    "case_id": case_id,
+                    "uploaded_by": uploaded_by,
                 })
+                result["persisted"] = True
                 repo.upsert_media_metadata(db, media_id, {
                     "format": metadata.get("format"),
                     "width": metadata.get("width"),
