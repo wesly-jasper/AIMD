@@ -17,6 +17,16 @@ This runner checks every code file against the hashes pinned in
 ``trufor_release`` before importing any of it, and checks the checkpoint against
 the manifest before unpickling it, so a modified file is refused rather than run.
 
+Memory grows with the pixel count: a whole 1080p pass needs ~4 GB of GPU memory,
+more than a 4 GB laptop card has (and Windows spills into system RAM rather than
+raising out-of-memory, so the CPU fallback never fires). Larger images therefore
+run in overlapping tiles. Downscaling instead was measured and rejected: it
+erases the noise and compression traces the model reads (image-level AUC on
+CocoGlide fell from 0.81 to 0.62 at 0.67x). Tiling keeps the image-level score
+global: the tile logits are blended into full-resolution maps and upstream's own
+detection head (confidence-weighted statistics pooling, then an MLP) runs once
+over them, exactly as it would on a whole-image pass.
+
 The previous runner loaded "a .onnx or a pickled nn.Module" and applied ImageNet
 normalisation itself. The released checkpoint is neither -- it is a state dict
 for an architecture that normalises internally -- so it could never have loaded
@@ -39,6 +49,7 @@ from typing import Any, Callable, Dict, List, Optional, Union
 import cv2
 import numpy as np
 import torch
+import torch.nn.functional as F
 from PIL import Image
 
 from app.services.detection.models import trufor_release as release
@@ -49,7 +60,56 @@ logger = logging.getLogger(__name__)
 #: tests; ``None`` means the upstream ``myEncoderDecoder``.
 ModelBuilder = Callable[[Any], torch.nn.Module]
 
+#: ``(x, log_w=None) -> pooled statistics``: upstream's
+#: ``weighted_statistics_pooling``, which the detection head is trained on.
+#: Injected by unit tests together with ``model_builder``.
+Pooling = Callable[..., torch.Tensor]
+
 _CHUNK = 1024 * 1024
+
+#: Tile origins stay on the 8x8 JPEG block grid, so every tile sees the
+#: compression blocks aligned as they are in the whole image.
+TILE_GRID = 8
+
+
+def tiled_limitation(tile_size: int) -> str:
+    return (
+        f"Localisation was computed in overlapping {tile_size} px tiles: a "
+        "manipulated area that fills most of a tile has little untouched context "
+        "to be compared against, and the integrity score can differ slightly (up "
+        "to ~0.07 in testing) from a single whole-image pass."
+    )
+
+
+def tile_spans(length: int, size: int, overlap: int) -> List[tuple[int, int]]:
+    """
+    ``(start, end)`` spans covering ``[0, length)`` with tiles of about ``size``.
+
+    Consecutive tiles overlap by at least ``overlap``. Every start is a multiple
+    of ``TILE_GRID``; the last tile therefore ends at ``length`` and may be up to
+    ``TILE_GRID - 1`` pixels longer than ``size``.
+    """
+    if length <= size:
+        return [(0, length)]
+    step = size - overlap
+    starts = list(range(0, length - size, step))
+    last = (length - size) // TILE_GRID * TILE_GRID
+    if last > starts[-1]:
+        starts.append(last)
+    return [(s, s + size) for s in starts[:-1]] + [(starts[-1], length)]
+
+
+def _blend_ramp(start: int, end: int, length: int, overlap: int) -> torch.Tensor:
+    """Per-pixel blend weight along one axis: rising over an edge shared with a neighbour."""
+    ramp = torch.ones(end - start)
+    if overlap == 0:
+        return ramp
+    rise = torch.arange(1, overlap + 1, dtype=torch.float32) / (overlap + 1)
+    if start > 0:
+        ramp[:overlap] = rise
+    if end < length:
+        ramp[-overlap:] = torch.minimum(ramp[-overlap:], rise.flip(0))
+    return ramp
 
 
 class _Node(dict):
@@ -156,7 +216,11 @@ class TruForRunner:
 
     ``model_builder`` replaces the upstream architecture; it exists for unit
     tests, which cannot ship TruFor's code. With a builder injected the upstream
-    code is neither verified nor imported.
+    code is neither verified nor imported, and ``pooling`` stands in for
+    upstream's pooling in the tiled detection head.
+
+    Images of more than ``tile_size ** 2`` pixels run in tiles of about
+    ``tile_size`` overlapping by ``tile_overlap``; smaller ones in one pass.
     """
 
     def __init__(
@@ -164,10 +228,22 @@ class TruForRunner:
         model_path: Optional[Union[str, Path]] = None,
         device: Optional[str] = None,
         model_builder: Optional[ModelBuilder] = None,
+        pooling: Optional[Pooling] = None,
+        tile_size: int = 1024,
+        tile_overlap: int = 128,
     ):
+        if tile_overlap < 0 or 2 * tile_overlap >= tile_size:
+            raise ValueError("TruFor tile overlap must be at least 0 and under half the tile size")
+        if (tile_size - tile_overlap) % TILE_GRID:
+            raise ValueError(
+                f"TruFor tile size minus overlap must be a multiple of {TILE_GRID}"
+            )
         self.model_path = Path(model_path) if model_path else None
         self.device = resolve_device(device)
         self.model_builder = model_builder
+        self.pooling = pooling
+        self.tile_size = tile_size
+        self.tile_overlap = tile_overlap
         self.model: Optional[torch.nn.Module] = None
         self.loaded = False
         self.root: Optional[Path] = None
@@ -275,6 +351,11 @@ class TruForRunner:
             builder = self.model_builder
         else:
             builder = _import_upstream_builder(self._verify_code())
+            # Pinned in CODE_FILES, so verified above; importable once the
+            # builder has registered the upstream ``models`` package.
+            self.pooling = importlib.import_module(
+                "models.cmx.layer_utils"
+            ).weighted_statistics_pooling
 
         state_dict = self._load_state_dict()
         model = builder(trufor_config())
@@ -300,27 +381,80 @@ class TruForRunner:
         return tensor.unsqueeze(0), (rgb.shape[0], rgb.shape[1])
 
     def _forward(self, tensor: torch.Tensor, device: torch.device):
+        """One model pass; the localization and confidence logits and the detection logit, on the CPU."""
         assert self.model is not None
         with torch.inference_mode():
             pred, conf, det, _npp = self.model(tensor.to(device))
             if det is None or conf is None:
                 raise ValueError("TruFor model returned no detection score or reliability map")
-            localization = torch.softmax(pred.squeeze(0), dim=0)[1]
-            reliability = torch.sigmoid(conf.squeeze(0))[0]
-            score = torch.sigmoid(det).reshape(-1)[0]
-            return (
-                localization.float().cpu().numpy(),
-                reliability.float().cpu().numpy(),
-                float(score.cpu().item()),
-            )
+            return pred.float().cpu(), conf.float().cpu(), det.float().cpu()
 
-    def _infer(self, tensor: torch.Tensor) -> tuple[np.ndarray, np.ndarray, float, str, bool]:
+    def _detection_head(
+        self, pred: torch.Tensor, conf: torch.Tensor, device: torch.device
+    ) -> torch.Tensor:
+        """
+        Upstream's image-level head (``builder_np_conf``, ``confpool``) on full-size
+        logit maps: the confidence-weighted statistics of the confidence map and
+        of the localization logit margin, then the trained MLP.
+        """
+        assert self.model is not None
+        detection = getattr(self.model, "detection", None)
+        if self.pooling is None or detection is None:
+            raise RuntimeError("TruFor detection head is not available for tiled inference")
+        with torch.inference_mode():
+            f1 = self.pooling(conf).view(1, -1)
+            f2 = self.pooling(pred[:, 1:2] - pred[:, 0:1], F.logsigmoid(conf)).view(1, -1)
+            features = torch.cat((f1, f2), -1).to(device)
+            return detection(features).float().cpu()
+
+    def _forward_tiled(self, tensor: torch.Tensor, device: torch.device):
+        """
+        The logit maps blended from overlapping tiles, then the detection head
+        once over the whole stitched maps. Logits, not probabilities, are
+        blended: they are what the head pools.
+        """
+        _, _, h, w = tensor.shape
+        rows = tile_spans(h, self.tile_size, self.tile_overlap)
+        cols = tile_spans(w, self.tile_size, self.tile_overlap)
+        pred_sum = conf_sum = None
+        weight_sum = torch.zeros(1, 1, h, w)
+        for y0, y1 in rows:
+            for x0, x1 in cols:
+                pred, conf, _det = self._forward(tensor[:, :, y0:y1, x0:x1], device)
+                if pred.shape[-2:] != (y1 - y0, x1 - x0):
+                    pred = F.interpolate(pred, size=(y1 - y0, x1 - x0), mode="bilinear", align_corners=False)
+                    conf = F.interpolate(conf, size=(y1 - y0, x1 - x0), mode="bilinear", align_corners=False)
+                if pred_sum is None:
+                    pred_sum = torch.zeros(1, pred.shape[1], h, w)
+                    conf_sum = torch.zeros(1, conf.shape[1], h, w)
+                weight = torch.outer(
+                    _blend_ramp(y0, y1, h, self.tile_overlap),
+                    _blend_ramp(x0, x1, w, self.tile_overlap),
+                )
+                pred_sum[:, :, y0:y1, x0:x1] += pred * weight
+                conf_sum[:, :, y0:y1, x0:x1] += conf * weight
+                weight_sum[:, :, y0:y1, x0:x1] += weight
+        pred = pred_sum / weight_sum
+        conf = conf_sum / weight_sum
+        return pred, conf, self._detection_head(pred, conf, device), len(rows) * len(cols)
+
+    def _run(self, tensor: torch.Tensor, device: torch.device):
+        _, _, h, w = tensor.shape
+        with torch.inference_mode():
+            if h * w <= self.tile_size ** 2:
+                pred, conf, det = self._forward(tensor, device)
+                return pred, conf, det, 1
+            return self._forward_tiled(tensor, device)
+
+    def _infer(
+        self, tensor: torch.Tensor
+    ) -> tuple[np.ndarray, np.ndarray, float, str, bool, int]:
         """Run on the configured device; on CUDA out-of-memory, once more on the CPU."""
         assert self.model is not None
         with self._lock:
             try:
-                loc, rel, score = self._forward(tensor, self.device)
-                return loc, rel, score, str(self.device), False
+                pred, conf, det, tiles = self._run(tensor, self.device)
+                device_used, oom_fallback = str(self.device), False
             except torch.cuda.OutOfMemoryError:
                 if self.device.type != "cuda":
                     raise
@@ -329,10 +463,20 @@ class TruForRunner:
                 cpu = torch.device("cpu")
                 self.model.to(cpu)
                 try:
-                    loc, rel, score = self._forward(tensor, cpu)
+                    pred, conf, det, tiles = self._run(tensor, cpu)
                 finally:
                     self.model.to(self.device)
-                return loc, rel, score, "cpu", True
+                device_used, oom_fallback = "cpu", True
+            finally:
+                # Blocks cached for one image's shapes fragment the next one's:
+                # a 1024x768 pass followed by a tiled 1080p one reserved 3.7 GB
+                # instead of 3.1 GB, past what a 4 GB card has free.
+                if self.device.type == "cuda":
+                    torch.cuda.empty_cache()
+        localization = torch.softmax(pred.squeeze(0), dim=0)[1].numpy()
+        reliability = torch.sigmoid(conf.squeeze(0))[0].numpy()
+        score = float(torch.sigmoid(det).reshape(-1)[0].item())
+        return localization, reliability, score, device_used, oom_fallback, tiles
 
     def predict(self, file_path: Union[str, Path], threshold: float = 0.50) -> Dict[str, Any]:
         """
@@ -352,8 +496,9 @@ class TruForRunner:
 
         started = time.perf_counter()
         tensor, (h, w) = self._preprocess(file_path)
-        localization, reliability, score, device_used, oom_fallback = self._infer(tensor)
+        localization, reliability, score, device_used, oom_fallback, tiles = self._infer(tensor)
         inference_ms = (time.perf_counter() - started) * 1000.0
+        tiled = tiles > 1
 
         if localization.shape != (h, w):
             localization = cv2.resize(localization, (w, h), interpolation=cv2.INTER_LINEAR)
@@ -387,6 +532,13 @@ class TruForRunner:
                 "reliability_mean": round(float(reliability.mean()), 4),
                 "regions_detected": len(regions),
                 "inference_time_ms": round(inference_ms, 1),
+                "tiling": {
+                    "tiled": tiled,
+                    "tiles": tiles,
+                    "tile_size": self.tile_size,
+                    "tile_overlap": self.tile_overlap,
+                },
+                **({"limitations": [tiled_limitation(self.tile_size)]} if tiled else {}),
             },
         }
 

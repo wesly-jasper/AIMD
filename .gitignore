@@ -137,3 +137,7 @@ desktop.ini
 .agents/
 .taste-skill/
 skills-lock.json
+
+# Dataset archives and local experiment scripts
+*.parquet
+backend/.scratch/

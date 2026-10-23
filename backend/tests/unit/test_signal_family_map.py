@@ -67,3 +67,14 @@ def test_families_that_share_a_physical_basis_are_grouped():
     assert _SIGNAL_FAMILY["FaceRegionAnalyzer"] == _SIGNAL_FAMILY[
         "BaselineFaceDetector"
     ]
+
+
+def test_ai_generation_is_its_own_branch_not_a_manipulation_family():
+    """UnivFD asks whether an image was generated, not whether it was edited."""
+    from app.services.detection.engine.image_detection_engine import (
+        NON_MANIPULATION_FAMILIES,
+    )
+
+    assert _SIGNAL_FAMILY["UnivFDDetector"] == "ai_generation"
+    assert "ai_generation" in NON_MANIPULATION_FAMILIES
+    assert _NON_EVIDENTIAL in NON_MANIPULATION_FAMILIES

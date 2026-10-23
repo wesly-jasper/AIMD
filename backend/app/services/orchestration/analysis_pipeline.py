@@ -35,12 +35,13 @@ from app.db.models import AnalysisRecord
 from app.schemas.detection import Assessment, EvidenceStrength
 from app.services.detection.engine.image_detection_engine import (
     _SIGNAL_FAMILY,
+    NON_MANIPULATION_FAMILIES,
     ImageDetectionEngine,
 )
 from app.services.preprocessing.metadata_extractor import MetadataExtractor
 from app.services.preprocessing.frame_extractor import FrameExtractor
 from app.services.preprocessing.keyframe_selector import KeyframeSelector
-from app.services.fingerprinting.fingerprint import FingerprintService
+from app.services.fingerprinting.fingerprint import EMBEDDING_ALGORITHM, FingerprintService
 from app.services.similarity.similarity_engine import SimilarityEngine
 from app.services.provenance.source_tracer import SourceTracer
 from app.services.provenance.graph import build_provenance_graph
@@ -65,6 +66,16 @@ _SUSPICIOUS_VALUES = {
 #: reach the database merely because nobody remembered to exclude it.
 _CONFIG_SNAPSHOT_KEYS = (
     "trufor_enabled",
+    "trufor_tile_size",
+    "trufor_tile_overlap",
+    "univfd_enabled",
+    "univfd_threshold",
+    "similarity_embedding_enabled",
+    "similarity_phash_max_distance",
+    "similarity_cosine_min",
+    "similarity_min_inliers",
+    "similarity_candidate_phash_distance",
+    "similarity_candidate_cosine",
     "copymove_enabled",
     "copymove_detector_type",
     "manipulation_mask_enabled",
@@ -403,13 +414,17 @@ class AnalysisPipeline:
                 # is not lost. Not a failure: AVAILABLE+SKIPPED (deliberately
                 # not run, e.g. unsupported media type), or any skip of a
                 # non-evidential detector -- an absent object detector used to
-                # mark every image analysis PARTIAL.
+                # mark every image analysis PARTIAL. An absent AI-generation
+                # detector is not a gap in the manipulation analysis either; its
+                # own branch reports UNAVAILABLE instead.
                 detector_name = det_data.get("detector", "unknown")
-                non_evidential = _SIGNAL_FAMILY.get(detector_name) == "non_evidential"
+                outside_verdict = (
+                    _SIGNAL_FAMILY.get(detector_name) in NON_MANIPULATION_FAMILIES
+                )
                 is_gap = execution_status == "FAILED" or (
                     execution_status == "SKIPPED"
                     and availability == "UNAVAILABLE"
-                    and not non_evidential
+                    and not outside_verdict
                 )
                 if is_gap or meta.get("failure_messages"):
                     failures.append(
@@ -451,8 +466,12 @@ class AnalysisPipeline:
         failures: list,
     ) -> None:
         try:
+            # Ingestion already stored this media's fingerprints; every analysis
+            # used to write the whole set again. Only backfill what is missing,
+            # such as an embedding for media ingested before embeddings were on.
+            stored = {fp.algorithm for fp in repo.get_fingerprints_for_media(db, media_id)}
             fp_result = self._fingerprint_service.generate(
-                file_path, media_id=media_id, analysis_id=analysis_id
+                file_path, media_id=media_id, analysis_id=analysis_id, skip=stored
             )
             records = fp_result.get("_records", [])
             if records:
@@ -473,6 +492,10 @@ class AnalysisPipeline:
             media = repo.get_media(db, media_id)
             fingerprints = repo.get_fingerprints_for_media(db, media_id)
             fp_dict = {fp.algorithm: fp.value for fp in fingerprints}
+            embedding_version = next(
+                (fp.algorithm_version for fp in fingerprints
+                 if fp.algorithm == EMBEDDING_ALGORITHM), None
+            )
 
             result = self._similarity_engine.search(
                 str(file_path),
@@ -480,6 +503,7 @@ class AnalysisPipeline:
                 db=db,
                 exclude_media_id=media_id,
                 owner=media.uploaded_by if media else None,
+                embedding_version=embedding_version,
             )
 
             matches_to_save = []
@@ -493,6 +517,8 @@ class AnalysisPipeline:
                     "method": m.get("method", "perceptual"),
                     "algorithm": m.get("algorithm"),
                     "rank": i + 1,
+                    "verification_status": m.get("verification_status"),
+                    "verification": m.get("verification"),
                 })
             for i, m in enumerate(result.get("external_matches", [])):
                 matches_to_save.append({
@@ -584,12 +610,18 @@ class AnalysisPipeline:
 
             for match in similarity_matches:
                 if match.source_media_id and match.source_media_id != media_id:
+                    # Only a verified match says the two are the same image; a
+                    # retrieved-but-unverified candidate stays "similar".
+                    verified = match.verification_status == "VERIFIED_MATCH"
                     edges.append({
                         "source_node_id": match.source_media_id,
                         "target_node_id": media_id,
-                        "relationship": "visually_similar_to",
+                        "relationship": "same_image_as" if verified else "visually_similar_to",
                         "confidence": match.similarity,
-                        "evidence": f"Method: {match.method}, Algorithm: {match.algorithm}",
+                        "evidence": (
+                            f"Method: {match.method}, Algorithm: {match.algorithm}, "
+                            f"Verification: {match.verification_status or 'NOT_VERIFIED'}"
+                        ),
                     })
 
             repo.upsert_provenance_graph(db, analysis_id, nodes, edges)
@@ -642,8 +674,27 @@ class AnalysisPipeline:
                 # there labelled every detector INCONCLUSIVE, including ones
                 # that completed with a clear result.
                 assessment = _plain_value(det.assessment or "INCONCLUSIVE")
+                ai_branch = _SIGNAL_FAMILY.get(det.detector) == "ai_generation"
 
-                if assessment in _SUSPICIOUS_VALUES:
+                if ai_branch and observation_polarity(det) is not None:
+                    # Generation, not editing: never worded as a forensic
+                    # anomaly, and a low score is never worded as "real".
+                    if det.manipulation_detected:
+                        desc = (
+                            f"OBSERVATION: {det.detector} scored {det.confidence:.3f} "
+                            f"for AI generation, at or above its threshold of "
+                            f"{meta.get('threshold')}. Uncalibrated; reported apart "
+                            "from the manipulation assessment."
+                        )
+                    else:
+                        desc = (
+                            f"OBSERVATION: {det.detector} scored {det.confidence:.3f} "
+                            f"for AI generation, below its threshold of "
+                            f"{meta.get('threshold')}. This is not a finding that "
+                            "the image was camera-captured."
+                        )
+                    cat = "OBSERVATION"
+                elif assessment in _SUSPICIOUS_VALUES:
                     desc = (
                         f"OBSERVATION: {det.detector} detected forensic anomalies "
                         f"(type: {det.manipulation_type}, confidence: {det.confidence:.2f}). "
@@ -766,12 +817,14 @@ class AnalysisPipeline:
         # Non-evidential detectors (object detection) cannot leave a gap in
         # coverage: their result is not evidence either way, so neither is their
         # absence. Counting a skipped object detector here made every analysis
-        # INCONCLUSIVE.
+        # INCONCLUSIVE. The AI-generation detector is excluded for a different
+        # reason: it answers another question, decided by
+        # ``_decide_ai_generation``, and must not move this verdict either way.
         # Polarity, not the label alone: a FAILED run can carry an INCONCLUSIVE
         # label, and it is a gap, not a detector that ran and was undecided.
         polarities = [
             observation_polarity(d) for d in detections
-            if _SIGNAL_FAMILY.get(d.detector) != "non_evidential"
+            if _SIGNAL_FAMILY.get(d.detector) not in NON_MANIPULATION_FAMILIES
         ]
         negative = [p for p in polarities if p == "NO_ANOMALY_OBSERVED"]
         # Ran, but could not support a determination either way.
@@ -782,17 +835,26 @@ class AnalysisPipeline:
         # Positive observations stand even when other detectors did not report:
         # missing data cannot retract an anomaly that was measured.
         if suspicious:
+            # An AI-generation positive is invisible here: it says nothing about
+            # editing, so with nothing else firing it falls through to the
+            # coverage rules below, and beside other positives it changes nothing.
             families = {
                 ImageDetectionEngine._family(d.detector) for d in suspicious
-            }
-            families.discard("non_evidential")
-            if not families:
+            } - {"ai_generation"}
+            only_non_evidential = bool(families) and families <= NON_MANIPULATION_FAMILIES
+            families -= NON_MANIPULATION_FAMILIES
+            if only_non_evidential:
                 return AssessmentDecision(
                     Assessment.INCONCLUSIVE.value, EvidenceStrength.NONE.value,
                     "non_evidential_only",
                     "Only detectors that are not evidence of manipulation (such "
                     "as object detection) reported anything.",
                 )
+            suspicious = [
+                d for d in suspicious
+                if ImageDetectionEngine._family(d.detector) in families
+            ]
+        if suspicious:
             names = ", ".join(sorted(families))
             localised = any(getattr(d, "regions", None) for d in suspicious)
             if len(families) >= 2 and localised:
@@ -856,6 +918,77 @@ class AnalysisPipeline:
             "found, not a determination of authenticity.",
         )
 
+    @staticmethod
+    def _decide_ai_generation(detections: list) -> dict:
+        """
+        The AI-generation branch, decided apart from the manipulation verdict.
+
+        Its own question ("was this generated?") with its own detector, so it is
+        reported beside ``_decide`` and never folded into it: an edited camera
+        photograph and a wholly generated image are different findings, and a
+        score from one must not raise or lower the other.
+
+        ``NOT_INDICATED`` is a statement about one detector's score, not a
+        finding that the image was camera-captured.
+        """
+        dets = [
+            d for d in detections
+            if _SIGNAL_FAMILY.get(d.detector) == "ai_generation"
+        ]
+        if not dets:
+            return {
+                "status": "UNAVAILABLE",
+                "detector": None,
+                "rationale": "No AI-generation detector is configured, so whether "
+                             "this image was generated was not assessed.",
+            }
+
+        det = dets[0]
+        meta = getattr(det, "detector_metadata", None) or {}
+        base = {
+            "detector": det.detector,
+            "detector_version": getattr(det, "detector_version", None),
+            "score_semantics": _plain_value(det.score_semantics),
+            "semantics": meta.get("semantics"),
+            "limitations": list(meta.get("limitations") or []),
+        }
+        if observation_polarity(det) is None or _plain_value(det.execution_status) != "COMPLETED":
+            return {
+                **base,
+                "status": "UNAVAILABLE",
+                "reason": det.status_reason,
+                "rationale": f"{det.detector} did not produce a score "
+                             f"({_plain_value(det.availability)}/"
+                             f"{_plain_value(det.execution_status)}), so whether "
+                             "this image was generated was not assessed.",
+            }
+
+        score = float(det.confidence)
+        threshold = meta.get("threshold")
+        indicated = bool(det.manipulation_detected)
+        common = {
+            **base,
+            "score": score,
+            "logit": meta.get("logit"),
+            "threshold": threshold,
+        }
+        if indicated:
+            return {
+                **common,
+                "status": "AI_GENERATION_INDICATED",
+                "rationale": f"{det.detector} scored {score:.3f}, at or above its "
+                             f"threshold of {threshold}. The score is uncalibrated "
+                             "and supports examiner review, not a conclusion.",
+            }
+        return {
+            **common,
+            "status": "NOT_INDICATED",
+            "rationale": f"{det.detector} scored {score:.3f}, below its threshold "
+                         f"of {threshold}. This is not a finding that the image "
+                         "was captured by a camera: generators this detector was "
+                         "not trained on can score low.",
+        }
+
     # ── Forensic record: observations -> finding -> assessment ────────────────
 
     def _run_forensic_record(
@@ -877,7 +1010,10 @@ class AnalysisPipeline:
             for det in detections:
                 polarity = observation_polarity(det)
                 if polarity is None:
-                    gaps.append(det.id)
+                    # A missing AI-generation detector is reported on its own
+                    # branch, not as a gap in the manipulation assessment.
+                    if _SIGNAL_FAMILY.get(det.detector) != "ai_generation":
+                        gaps.append(det.id)
                     continue
                 observations.append({
                     "id": str(uuid.uuid4()),
@@ -905,6 +1041,7 @@ class AnalysisPipeline:
                 "rule": decision.rule,
                 "rationale": decision.rationale,
                 "coverage_gaps": gaps,
+                "ai_generation": self._decide_ai_generation(detections),
             })
         except Exception as exc:
             db.rollback()
@@ -930,7 +1067,10 @@ class AnalysisPipeline:
     def _finding_for(
         decision: AssessmentDecision, observations: list[dict]
     ) -> Optional[tuple[str, list[tuple[str, str]]]]:
-        evidential = [o for o in observations if o["signal_family"] != "non_evidential"]
+        evidential = [
+            o for o in observations
+            if o["signal_family"] not in NON_MANIPULATION_FAMILIES
+        ]
 
         if decision.category in _SUSPICIOUS_VALUES:
             supports = [

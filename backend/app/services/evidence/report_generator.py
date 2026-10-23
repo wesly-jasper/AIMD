@@ -64,6 +64,15 @@ class ReportGenerator:
                 "> **NOTICE [OBSERVATION]:** Forensic anomalies were identified above standard thresholds. "
                 "Review the detection signals and localized regions below for specific findings."
             )
+        elif verdict == "LIKELY_MANIPULATED":
+            # This verdict used to fall through to the INCONCLUSIVE notice, so
+            # the strongest finding the system makes was reported as no finding.
+            lines.append(
+                "> **NOTICE [OBSERVATION]:** Independent signal families reported "
+                "anomalies that localise to specific regions, consistent with "
+                "localised editing. Review the detection signals and regions below; "
+                "this supports examiner review and is not proof of manipulation."
+            )
         elif verdict in ("NO_SIGNIFICANT_ANOMALIES_DETECTED", "CLEAN"):
             lines.append(
                 "> **NOTICE [OBSERVATION]:** No manipulation signals exceeded the "
@@ -77,6 +86,10 @@ class ReportGenerator:
                 "> **NOTICE [UNCERTAINTY]:** Analysis is INCONCLUSIVE. Available signals do not provide sufficient "
                 "confidence for a conclusive assessment."
             )
+
+        lines.extend(self._ai_generation_lines(
+            evidence_package.get("ai_generation_evidence") or {}
+        ))
 
         lines.extend([
             "",
@@ -119,7 +132,8 @@ class ReportGenerator:
         if isinstance(fps, dict):
             for algo, fp_info in fps.items():
                 if isinstance(fp_info, dict):
-                    val = fp_info.get("value", "")
+                    # None for an embedding, whose vector is not printed.
+                    val = fp_info.get("value") or fp_info.get("algorithm_version") or ""
                     val_disp = f"`{val[:32]}...`" if len(val) > 32 else f"`{val}`"
                     cat = fp_info.get("evidence_category", "OBSERVATION")
                     scope = fp_info.get("scope", "full")
@@ -179,8 +193,20 @@ class ReportGenerator:
         lines.append(f"- **Local Stored Matches:** `{len(loc_matches)}`")
         lines.append(f"- **External Source Matches:** `{len(ext_matches)}`")
         if loc_matches:
-            for m in loc_matches[:3]:
-                lines.append(f"  - Stored Media ID `{m.get('source_media_id')}` (similarity: `{m.get('similarity'):.2%}`, method: `{m.get('method')}`)")
+            lines.append(
+                f"- **Verified Matches:** `{similarity.get('verified_matches', 0)}` "
+                "(perceptual hash, embedding and geometric checks all passed)"
+            )
+            for m in loc_matches[:5]:
+                status = m.get("verification_status") or "NOT_VERIFIED"
+                lines.append(
+                    f"  - Stored Media ID `{m.get('source_media_id')}` -- `{status}` "
+                    f"(similarity: `{m.get('similarity'):.2%}`, method: `{m.get('method')}`)"
+                )
+            lines.append(
+                "> *Note:* SIMILAR_UNVERIFIED means a candidate was retrieved but "
+                "not confirmed as a copy of the same image; it is a lead, not a match."
+            )
         lines.append("")
 
         # Earliest known source
@@ -247,3 +273,33 @@ class ReportGenerator:
         ])
 
         return "\n".join(lines)
+
+    @staticmethod
+    def _ai_generation_lines(ai: Dict[str, Any]) -> list[str]:
+        """
+        The AI-generation branch, rendered apart from the manipulation verdict.
+
+        It answers a different question, so it gets its own heading and its own
+        status, and a low score is never worded as "real" or "authentic".
+        """
+        status = ai.get("status") or "UNAVAILABLE"
+        lines = [
+            "",
+            "### AI-Generation Assessment (reported separately)",
+            "",
+            f"- **Status:** `{status}`",
+        ]
+        if ai.get("score") is not None:
+            lines.append(
+                f"- **Score:** `{ai['score']:.3f}` against threshold "
+                f"`{ai.get('threshold')}` ({ai.get('detector')}; uncalibrated model "
+                "score, not a probability)"
+            )
+        if ai.get("rationale"):
+            lines.append(f"- **Rationale:** {ai['rationale']}")
+        lines.append(
+            "> This is independent of the forensic assessment above and does not "
+            "raise or lower it. A status of NOT_INDICATED is not a finding that "
+            "the image was captured by a camera."
+        )
+        return lines

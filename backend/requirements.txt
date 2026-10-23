@@ -37,7 +37,7 @@ soundfile>=0.12
 torch>=2.3
 torchvision>=0.18
 onnxruntime>=1.17
-open-clip-torch>=2.24        # CLIP ViT-L/14: UnivFD backbone + similarity embeddings
+open-clip-torch>=2.24,<4     # CLIP ViT-L/14: UnivFD backbone + similarity embeddings (4.x drops load_openai_model)
 timm>=0.9                    # TruFor's SegFormer encoder (code fetched by scripts/fetch_models.py)
 facenet-pytorch==2.5.3       # MTCNN face detection (2.6 pins torch<2.3 and numpy<2)
 mediapipe>=0.10.14,<0.11     # face landmarks

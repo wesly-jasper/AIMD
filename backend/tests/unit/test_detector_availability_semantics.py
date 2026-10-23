@@ -152,6 +152,23 @@ def test_health_reports_trufor_model_as_configured_not_operational(
     assert "models" not in response
 
 
+def test_health_reports_univfd_configuration(tmp_path, monkeypatch):
+    from app.core.health import univfd_configuration_status
+    from app.services.detection.models import univfd_release as release
+
+    monkeypatch.setattr(settings, "univfd_enabled", False)
+    assert univfd_configuration_status() == "disabled"
+
+    monkeypatch.setattr(settings, "univfd_enabled", True)
+    monkeypatch.setattr(settings, "univfd_model_path", tmp_path)
+    (tmp_path / release.HEAD_FILE).write_bytes(b"head")
+    # The head alone is not enough: the CLIP backbone is the other half.
+    assert univfd_configuration_status() == "model_missing"
+
+    (tmp_path / release.CLIP_FILE).write_bytes(b"not validated")
+    assert univfd_configuration_status() == "configured"
+
+
 def test_health_does_not_fabricate_detector_availability(monkeypatch):
     """Registration is reported; availability is not invented."""
     from app import main

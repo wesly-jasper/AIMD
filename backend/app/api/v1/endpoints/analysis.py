@@ -156,6 +156,24 @@ def get_analysis(
             }
             if assessment_record else None
         ),
+        # Reported beside the manipulation assessment, never folded into it.
+        # NULL for analyses recorded before the branch existed.
+        "ai_generation": assessment_record.ai_generation if assessment_record else None,
+        "similarity_matches": [
+            {
+                "id": m.id,
+                "match_type": m.match_type,
+                "source_media_id": m.source_media_id,
+                "external_url": m.external_url,
+                "similarity": m.similarity,
+                "method": m.method,
+                "algorithm": m.algorithm,
+                "rank": m.rank,
+                "verification_status": m.verification_status,
+                "verification": m.verification,
+            }
+            for m in repo.get_similarity_matches_for_analysis(db, analysis_id)
+        ],
         "observations": [
             {
                 "id": o.id,

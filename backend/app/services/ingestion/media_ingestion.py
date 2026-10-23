@@ -178,7 +178,9 @@ class MediaIngestionService:
             logger.warning("Metadata extraction during ingest failed: %s", exc)
             metadata = {"media_type": media_type, "source": "FALLBACK"}
 
-        # Extract fingerprints
+        # Extract fingerprints. ``fp_result`` must exist on failure too: the
+        # persistence step below reads it, and used to raise NameError there.
+        fp_result: dict = {}
         try:
             fp_result = self.fingerprint_service.generate(file_path, media_id=media_id)
             fingerprint = {k: v for k, v in fp_result.items() if not k.startswith("_")}

@@ -83,6 +83,9 @@ _SIGNAL_FAMILY: dict[str, str] = {
     "FaceRegionAnalyzer": "face",
     "BaselineFaceDetector": "face",
     "TruForDetector": "learned",
+    # Whole-image "was this generated?", not "was this edited?". Reported on its
+    # own branch of the assessment, never counted toward the manipulation verdict.
+    "UnivFDDetector": "ai_generation",
     # Object presence is not manipulation evidence. A detector that finds a dog in
     # a photograph has established that there is a dog in the photograph. It is
     # kept out of every family so it can never contribute to an assessment.
@@ -90,6 +93,11 @@ _SIGNAL_FAMILY: dict[str, str] = {
     "BaselineObjectDetector": "non_evidential",
 }
 _NON_EVIDENTIAL = "non_evidential"
+_AI_GENERATION = "ai_generation"
+#: Families that never enter the manipulation verdict, its coverage or its
+#: PARTIAL rule: object presence is not evidence at all, and AI generation is
+#: evidence about a different question with its own branch of the assessment.
+NON_MANIPULATION_FAMILIES = frozenset({_NON_EVIDENTIAL, _AI_GENERATION})
 
 
 class ImageDetectionEngine:
@@ -192,11 +200,14 @@ class ImageDetectionEngine:
         # coverage" and turned every assessment INCONCLUSIVE, although object
         # presence is not evidence either way. It is still listed in
         # ``incomplete_detectors`` so the record shows what did not run.
+        # The AI-generation detector is excluded the same way: its verdict is
+        # reported on its own branch and must not move this one.
         evidential = [
-            r for r in usable if self._family(r.detector) != _NON_EVIDENTIAL
+            r for r in usable if self._family(r.detector) not in NON_MANIPULATION_FAMILIES
         ]
         incomplete_evidential = [
-            r for r in incomplete if self._family(r.detector) != _NON_EVIDENTIAL
+            r for r in incomplete
+            if self._family(r.detector) not in NON_MANIPULATION_FAMILIES
         ]
 
         positive = [r for r in evidential if r.manipulation_detected]

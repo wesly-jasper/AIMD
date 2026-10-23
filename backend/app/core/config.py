@@ -70,10 +70,40 @@ class Settings(BaseSettings):
     trufor_enabled: bool = False
     # The TruFor root scripts/fetch_models.py installs into (backend/models/trufor).
     trufor_model_path: Optional[Path] = None
+    # Images over trufor_tile_size² pixels run in overlapping tiles so peak GPU
+    # memory stays near 2.2 GB whatever the image size (a whole 1080p pass needs
+    # ~4 GB). The step (size - overlap) must be a multiple of 8, the JPEG grid.
+    trufor_tile_size: int = 1024
+    trufor_tile_overlap: int = 128
+    # UnivFD AI-generation detector: a linear head on CLIP ViT-L/14 features. The
+    # root scripts/fetch_univfd.py installs into (backend/models/univfd) holds the
+    # CLIP backbone and the head; similarity embeddings use the same backbone.
+    univfd_enabled: bool = False
+    univfd_model_path: Optional[Path] = None
+    # Applied to sigmoid(logit), an uncalibrated model score; 0.5 is the paper's.
+    univfd_threshold: float = 0.5
     ai_image_model_path: Optional[Path] = None
     deepfake_model_path: Optional[Path] = None
     audio_model_path: Optional[Path] = None
     device: str = "auto"  # auto | cpu | cuda
+
+    # ── Similarity search ─────────────────────────────────────────────────────
+    # Store a CLIP embedding per image at ingestion (needs univfd_model_path).
+    similarity_embedding_enabled: bool = False
+    # A candidate is VERIFIED_MATCH only when all three agree: pHash Hamming
+    # distance (of 64 bits), embedding cosine, and ORB keypoints consistent with
+    # one homography. Retrieval casts a wider net than verification.
+    # The cosine gate is a sanity floor, not the discriminator: on CocoGlide's
+    # 256 px real photographs a half-size JPEG q70 copy embeds as low as 0.73,
+    # while a different photograph of the same class reaches 0.88. pHash (copies
+    # <= 2, lookalikes >= 22) and ORB inliers (copies >= 20, lookalikes <= 15)
+    # separate the two; the cosine only rejects a geometric match whose content
+    # CLIP reads as unrelated.
+    similarity_phash_max_distance: int = 10
+    similarity_cosine_min: float = 0.70
+    similarity_min_inliers: int = 20
+    similarity_candidate_phash_distance: int = 20
+    similarity_candidate_cosine: float = 0.80
 
     # ── Advanced Localization Detectors ─────────────────────────────────────
     copymove_enabled: bool = True

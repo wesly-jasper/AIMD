@@ -90,14 +90,14 @@ def test_unavailable_evidential_detector_is_still_a_stage_failure(monkeypatch):
 
 
 def _detection(db, analysis_id, detector, assessment, *, execution="COMPLETED",
-               availability="AVAILABLE", status_reason=None):
+               availability="AVAILABLE", status_reason=None, metadata=None):
     repo.create_detection(db, {
         "analysis_id": analysis_id, "detector": detector, "media_type": "image",
         "manipulation_type": "test", "availability": availability,
         "execution_status": execution, "assessment": assessment, "confidence": 0.4,
         "score_semantics": "HEURISTIC_SEVERITY", "status_reason": status_reason,
         # Deliberately no "assessment" key: detectors no longer write one here.
-        "detector_metadata": {},
+        "detector_metadata": metadata or {},
     })
 
 
@@ -215,3 +215,14 @@ def test_trufor_warning_only_when_trufor_did_not_run(db):
                for lim in service.build_evidence_package(without, db)["limitations"])
     assert not any(_TRUFOR_WARNING in lim
                    for lim in service.build_evidence_package(with_trufor, db)["limitations"])
+
+
+def test_tiled_trufor_result_carries_its_limitation(db):
+    """A completed TruFor result run in tiles says so, once, in the package."""
+    analysis_id = _analysis(db)
+    _detection(db, analysis_id, "TruForDetector", "LIKELY_MANIPULATED",
+               metadata={"tiling": {"tiled": True}, "limitations": ["computed in tiles"]})
+
+    limitations = EvidenceService().build_evidence_package(analysis_id, db)["limitations"]
+    assert limitations.count("TruFor: computed in tiles") == 1
+    assert not any(_TRUFOR_WARNING in lim for lim in limitations)

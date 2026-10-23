@@ -63,6 +63,18 @@ def trufor_configuration_status() -> str:
     return "model_missing"
 
 
+def univfd_configuration_status() -> str:
+    """UnivFD *configuration*, in the same sense as ``trufor_configuration_status``."""
+    from app.services.detection.models import univfd_release as release
+
+    if not settings.univfd_enabled:
+        return "disabled"
+    path = settings.univfd_model_path
+    if path and (path / release.CLIP_FILE).is_file() and (path / release.HEAD_FILE).is_file():
+        return "configured"
+    return "model_missing"
+
+
 @lru_cache(maxsize=1)
 def _registered_image_detectors() -> tuple[str, ...]:
     """
@@ -100,6 +112,7 @@ def detector_report() -> dict[str, Any]:
     return {
         "registry_status": registry_status,
         "trufor": trufor_configuration_status(),
+        "univfd": univfd_configuration_status(),
         "registered_image_detectors": registered,
         # Per-detector availability reporting requires the detector availability
         # contract (roadmap Phase 2). Until then this is stated as absent rather

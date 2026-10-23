@@ -10,9 +10,12 @@ traceable. Every fingerprint carries:
   - media_id: the media this belongs to
   - scope: full | frame | keyframe | audio
 """
+import base64
 import logging
 from pathlib import Path
 from typing import Any
+
+import numpy as np
 
 from app.services.fingerprinting.hash_generator import HashGenerator
 
@@ -24,10 +27,60 @@ _VIDEO_EXTS = {".mp4", ".avi", ".mov", ".mkv", ".m4v"}
 _AUDIO_EXTS = {".wav", ".mp3", ".aac", ".m4a", ".flac"}
 
 
+#: The image embedding stored for similarity retrieval.
+EMBEDDING_ALGORITHM = "clip-vit-l14"
+
+
+def encode_embedding(vector: np.ndarray) -> str:
+    """A unit-length float vector as base64 of its little-endian fp16 bytes."""
+    return base64.b64encode(np.asarray(vector, dtype="<f2").tobytes()).decode("ascii")
+
+
+def decode_embedding(value: str) -> np.ndarray:
+    """The inverse of ``encode_embedding``, as float32."""
+    return np.frombuffer(base64.b64decode(value), dtype="<f2").astype(np.float32)
+
+
+def _default_embedder() -> Any | None:
+    """
+    The shared CLIP backbone, or ``None`` when embeddings are off or not installed.
+
+    Called on the first image, never at construction: loading 890 MB of weights
+    must not happen just because an ingestion service was built.
+    """
+    from app.core.config import settings
+
+    if not settings.similarity_embedding_enabled:
+        return None
+    if not settings.univfd_model_path:
+        logger.warning("Image embeddings enabled but UNIVFD_MODEL_PATH is not set")
+        return None
+    try:
+        from app.services.detection.models.clip_backbone import get_clip_backbone
+
+        return get_clip_backbone(settings.univfd_model_path, device=settings.device)
+    except Exception as exc:
+        logger.warning("Image embeddings unavailable: %s", exc)
+        return None
+
+
 class FingerprintService:
 
-    def __init__(self):
+    def __init__(self, embedder: Any | None = None):
+        """
+        ``embedder`` maps an image path to a unit-length vector and has a
+        ``version_tag``. ``None`` means the shared CLIP backbone, resolved lazily
+        and only when ``SIMILARITY_EMBEDDING_ENABLED`` is set.
+        """
         self.hash_generator = HashGenerator()
+        self._embedder = embedder
+        self._embedder_resolved = embedder is not None
+
+    def _get_embedder(self) -> Any | None:
+        if not self._embedder_resolved:
+            self._embedder = _default_embedder()
+            self._embedder_resolved = True
+        return self._embedder
 
     def generate(
         self,
@@ -36,6 +89,7 @@ class FingerprintService:
         analysis_id: str | None = None,
         scope: str = "full",
         frame_index: int | None = None,
+        skip: frozenset[str] | set[str] = frozenset(),
     ) -> dict[str, Any]:
         """
         Generate all applicable fingerprints for a file.
@@ -43,6 +97,9 @@ class FingerprintService:
         Returns a dict with keys per algorithm, each containing
         {algorithm, algorithm_version, value, media_id, scope}.
         Also returns a 'fingerprints' list suitable for bulk DB insert.
+
+        Algorithms in ``skip`` (already stored for this media) get no record, and
+        the embedding is not computed at all.
         """
         file_path = Path(file_path)
         if not file_path.exists():
@@ -106,6 +163,25 @@ class FingerprintService:
             except Exception as exc:
                 logger.warning("dHash generation failed for %s: %s", file_path, exc)
 
-        results["_records"] = fingerprint_records
+            # ── Image embedding (retrieval only, never an identity) ──────────
+            embedder = None if EMBEDDING_ALGORITHM in skip else self._get_embedder()
+            if embedder is not None:
+                try:
+                    vector = embedder.embed(file_path)
+                    version = f"{embedder.version_tag}/retrieval224/l2"
+                    results[EMBEDDING_ALGORITHM + "_version"] = version
+                    fingerprint_records.append({
+                        "media_id": media_id,
+                        "analysis_id": analysis_id,
+                        "algorithm": EMBEDDING_ALGORITHM,
+                        "algorithm_version": version,
+                        "value": encode_embedding(vector),
+                        "scope": scope,
+                        "frame_index": frame_index,
+                    })
+                except Exception as exc:
+                    logger.warning("Image embedding failed for %s: %s", file_path, exc)
+
+        results["_records"] = [r for r in fingerprint_records if r["algorithm"] not in skip]
         results["_scope"] = scope
         return results

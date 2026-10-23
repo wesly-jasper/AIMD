@@ -6,6 +6,7 @@ TruFor's code is research-only and cannot ship with the repository. Tests that
 need the real architecture, the real weights or CocoGlide are skipped unless
 ``scripts/fetch_models.py`` has installed them into ``backend/models/trufor``.
 """
+import gc
 import json
 from pathlib import Path
 
@@ -16,9 +17,11 @@ from PIL import Image
 
 from app.services.detection.models import trufor_release as release
 from app.services.detection.models.trufor_runner import (
+    TILE_GRID,
     TruForRunner,
     _import_upstream_builder,
     sha256_file,
+    tile_spans,
     trufor_config,
 )
 
@@ -46,6 +49,30 @@ class FakeTruFor(torch.nn.Module):
         conf = self.conf(rgb)
         det = self.det(rgb.mean(dim=(2, 3)))
         return pred, conf, det, None
+
+
+class HeadedFakeTruFor(FakeTruFor):
+    """FakeTruFor with a ``detection`` MLP over pooled maps, as upstream's ``confpool`` has."""
+
+    def __init__(self, cfg=None):
+        super().__init__(cfg)
+        self.detection = torch.nn.Linear(4, 1)
+
+
+class RecordingPooling:
+    """Stands in for upstream's pooling: a weighted mean and the max, per channel."""
+
+    def __init__(self):
+        self.input_shapes = []
+
+    def __call__(self, x, log_w=None):
+        self.input_shapes.append(tuple(x.shape))
+        flat = x.flatten(2)
+        weights = (
+            torch.full_like(flat[:, :1], 1.0 / flat.shape[-1]) if log_w is None
+            else torch.softmax(log_w.flatten(2), dim=-1)
+        )
+        return torch.cat(((flat * weights).sum(-1), flat.amax(-1)), dim=1)
 
 
 class NotATensor:
@@ -226,6 +253,105 @@ def test_runner_regions_come_from_the_localization_map(tmp_path):
     assert regions[0]["extra"]["reliability_mean"] == pytest.approx(0.7)
 
 
+# ── Tiled inference ──────────────────────────────────────────────────────────
+
+def _tiled_fake_runner(root: Path, builder=HeadedFakeTruFor, pooling=None) -> TruForRunner:
+    torch.manual_seed(0)
+    _install(root, {"state_dict": builder().state_dict()})
+    runner = TruForRunner(
+        root, device="cpu", model_builder=builder,
+        pooling=pooling or RecordingPooling(), tile_size=32, tile_overlap=8,
+    )
+    runner.load()
+    return runner
+
+
+@pytest.mark.parametrize("length", [33, 40, 56, 61, 80, 83, 100, 1000])
+def test_tile_spans_cover_the_axis_on_the_jpeg_grid(length):
+    spans = tile_spans(length, 32, 8)
+
+    assert spans[0][0] == 0 and spans[-1][1] == length
+    for (start, end), (next_start, _) in zip(spans, spans[1:]):
+        assert end - next_start >= 8  # at least the nominal overlap
+    for start, end in spans:
+        assert start % TILE_GRID == 0
+        assert 32 <= end - start <= 32 + TILE_GRID - 1
+
+
+def test_tile_spans_leave_a_short_axis_whole():
+    assert tile_spans(20, 32, 8) == [(0, 20)]
+    assert tile_spans(32, 32, 8) == [(0, 32)]
+
+
+@pytest.mark.parametrize("size, overlap", [(32, -1), (32, 16), (32, 20), (32, 5), (1024, 100)])
+def test_invalid_tile_settings_are_refused(size, overlap):
+    with pytest.raises(ValueError):
+        TruForRunner(None, tile_size=size, tile_overlap=overlap)
+
+
+def test_small_images_run_whole_and_say_so(tmp_path):
+    runner = _tiled_fake_runner(tmp_path)
+    meta = runner.predict(_image(tmp_path / "x.png", size=(32, 32)))["metadata"]
+
+    assert meta["tiling"] == {"tiled": False, "tiles": 1, "tile_size": 32, "tile_overlap": 8}
+    assert "limitations" not in meta
+    assert runner.pooling.input_shapes == []  # the model's own score was used
+
+
+def test_tiled_maps_match_a_whole_image_pass(tmp_path):
+    """The stand-in network is pointwise, so blending overlapping tiles must be lossless."""
+    image = _image(tmp_path / "x.png", size=(83, 61))
+    tiled = _tiled_fake_runner(tmp_path / "tiled").predict(image)
+    whole = _tiled_fake_runner(tmp_path / "whole")
+    whole.tile_size = 10_000
+    reference = whole.predict(image)
+
+    for key in ("localization_map", "reliability_map"):
+        assert tiled[key].shape == (61, 83)
+        np.testing.assert_allclose(tiled[key], reference[key], atol=1e-5)
+    meta = tiled["metadata"]
+    assert meta["tiling"] == {"tiled": True, "tiles": 6, "tile_size": 32, "tile_overlap": 8}
+    assert meta["limitations"] and "32 px tiles" in meta["limitations"][0]
+
+
+def test_tiled_score_is_the_detection_head_on_the_whole_maps(tmp_path):
+    """The head runs once, on full-size maps, and scores what a whole-image head would."""
+    image = _image(tmp_path / "x.png", size=(80, 56))
+    runner = _tiled_fake_runner(tmp_path)
+    tensor, _ = runner._preprocess(image)
+    pred, conf, _det = runner._forward(tensor, torch.device("cpu"))
+    expected = float(torch.sigmoid(runner._detection_head(pred, conf, torch.device("cpu"))))
+    runner.pooling.input_shapes.clear()
+
+    result = runner.predict(image)
+
+    assert runner.pooling.input_shapes == [(1, 1, 56, 80), (1, 1, 56, 80)]
+    assert result["metadata"]["integrity_score"] == pytest.approx(expected, abs=1e-5)
+
+
+def test_tiled_tiles_are_on_the_grid_and_cover_the_image(tmp_path):
+    runner = _tiled_fake_runner(tmp_path)
+    seen = []
+    forward = runner._forward
+
+    def recording_forward(tensor, device):
+        seen.append(tuple(tensor.shape[-2:]))
+        return forward(tensor, device)
+
+    runner._forward = recording_forward
+    runner.predict(_image(tmp_path / "x.png", size=(80, 56)))
+
+    assert len(seen) == 6
+    assert all(32 <= h <= 39 and 32 <= w <= 39 for h, w in seen)
+
+
+def test_tiling_without_a_detection_head_is_refused(tmp_path):
+    """No silent fallback to an average of per-tile scores."""
+    runner = _tiled_fake_runner(tmp_path, builder=FakeTruFor)
+    with pytest.raises(RuntimeError, match="detection head"):
+        runner.predict(_image(tmp_path / "x.png", size=(80, 56)))
+
+
 # ── The real architecture (code fetched, weights optional) ──────────────────
 
 @needs_code
@@ -263,6 +389,53 @@ def test_real_weights_load_and_score_the_upstream_samples():
     assert fake["confidence"] > real["confidence"]
     assert fake["manipulation_detected"] is True
     assert fake["regions"], "the tampered sample should produce a localized region"
+
+
+@needs_weights
+def test_real_detection_head_reproduces_the_models_own_score(tmp_path):
+    """
+    The tiled path pools the stitched maps with upstream's head; on a whole image
+    that head must give exactly the score the model computes itself.
+    """
+    runner = TruForRunner(TRUFOR_ROOT)
+    runner.load()
+    tensor, _ = runner._preprocess(_image(tmp_path / "x.png", size=(256, 192)))
+    with torch.inference_mode():
+        pred, conf, det = runner._forward(tensor, runner.device)
+        head = runner._detection_head(pred, conf, runner.device)
+
+    assert torch.allclose(head, det, atol=1e-4)
+
+
+@needs_weights
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a CUDA device")
+def test_real_1080p_image_runs_tiled_within_a_4gb_card(tmp_path):
+    """
+    A whole 1080p pass peaks near 4 GB; tiled, TruFor's weights and activations
+    stay near 2.2 GB, leaving room for the CLIP backbone (~0.85 GB) beside it.
+    Measured above whatever earlier tests left on the device.
+    """
+    sample = TRUFOR_ROOT / release.SAMPLES_RELPATH / "pristine1.jpg"
+    if not sample.is_file():
+        pytest.skip("samples not fetched (scripts/fetch_models.py --samples)")
+    image = tmp_path / "1080p.png"
+    with Image.open(sample) as img:
+        img.convert("RGB").resize((1920, 1080), Image.BICUBIC).save(image)
+
+    gc.collect()
+    torch.cuda.empty_cache()
+    baseline = torch.cuda.memory_allocated()
+    runner = TruForRunner(TRUFOR_ROOT, device="cuda")
+    runner.load()
+    torch.cuda.synchronize()
+    torch.cuda.reset_peak_memory_stats()
+    result = runner.predict(image)
+    peak = torch.cuda.max_memory_allocated() - baseline
+
+    assert result["metadata"]["tiling"]["tiled"] is True
+    assert result["metadata"]["tiling"]["tiles"] == 4
+    assert result["localization_map"].shape == (1080, 1920)
+    assert peak < 2.5 * 1024 ** 3, f"TruFor peak {peak / 1024 ** 2:.0f} MB"
 
 
 def _cocoglide_pairs(limit: int):

@@ -343,6 +343,11 @@ class SimilarityMatchRecord(Base):
     method: Mapped[str] = mapped_column(String, nullable=False)      # sha256|phash|dhash|embedding
     algorithm: Mapped[Optional[str]] = mapped_column(String)
     rank: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    # VERIFIED_MATCH | SIMILAR_UNVERIFIED | NO_MATCH; NULL for matches recorded
+    # before verification existed (they were never verified).
+    verification_status: Mapped[Optional[str]] = mapped_column(String)
+    # The measurements and thresholds behind the status, and why a gate failed.
+    verification: Mapped[Optional[dict]] = mapped_column(JSON)
     discovered_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
     analysis: Mapped["AnalysisRecord"] = sa_relationship(back_populates="similarity_matches")
@@ -533,6 +538,9 @@ class AssessmentRecord(Base):
     rationale: Mapped[str] = mapped_column(Text, nullable=False)
     # Detection ids that produced no observation (UNAVAILABLE / FAILED / SKIPPED).
     coverage_gaps: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    # The AI-generation branch, reported beside the manipulation verdict above and
+    # never blended into it. NULL for assessments made before the branch existed.
+    ai_generation: Mapped[Optional[dict]] = mapped_column(JSON)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
     analysis: Mapped["AnalysisRecord"] = sa_relationship(back_populates="assessment_record")

@@ -7,6 +7,8 @@ from app.services.detection.detectors.image.trufor_detector import (
 from app.services.detection.models.trufor_runner import (
     TruForRunner
 )
+from app.services.detection.detectors.image.univfd_detector import UnivFDDetector
+from app.services.detection.models.univfd_runner import UnivFDRunner
 from app.services.detection.detectors.face_detector import BaselineFaceDetector
 from app.services.detection.detectors.object_detector import BaselineObjectDetector
 from app.services.detection.detectors.audio_detector import BaselineAudioAnalyzer
@@ -32,7 +34,12 @@ class DetectorFactory:
             )
 
         try:
-            runner = TruForRunner(settings.trufor_model_path, device=settings.device)
+            runner = TruForRunner(
+                settings.trufor_model_path,
+                device=settings.device,
+                tile_size=settings.trufor_tile_size,
+                tile_overlap=settings.trufor_tile_overlap,
+            )
             runner.load()
             return TruForDetector(runner)
         except Exception as exc:
@@ -40,6 +47,28 @@ class DetectorFactory:
             return TruForDetector(
                 runner=None,
                 initialization_error=f"TruFor initialization failed: {type(exc).__name__}",
+            )
+
+    @staticmethod
+    def create_univfd():
+        if not settings.univfd_enabled:
+            return None
+
+        if not settings.univfd_model_path:
+            return UnivFDDetector(
+                runner=None,
+                initialization_error="UnivFD model path is not configured",
+            )
+
+        try:
+            runner = UnivFDRunner(settings.univfd_model_path, device=settings.device)
+            runner.load()
+            return UnivFDDetector(runner, threshold=settings.univfd_threshold)
+        except Exception as exc:
+            logger.warning("UnivFD initialization unavailable: %s", type(exc).__name__)
+            return UnivFDDetector(
+                runner=None,
+                initialization_error=f"UnivFD initialization failed: {type(exc).__name__}",
             )
 
     @staticmethod

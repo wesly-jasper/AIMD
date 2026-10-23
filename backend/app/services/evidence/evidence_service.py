@@ -31,6 +31,21 @@ def _plain(raw: Any) -> Any:
     return raw.value if hasattr(raw, "value") else raw
 
 
+_EMBEDDING_ALGORITHMS = frozenset({"clip-vit-l14"})
+
+#: What each fingerprint is. Every non-SHA fingerprint used to be labelled a
+#: "Perceptual hash", including ones that are not hashes at all.
+_FINGERPRINT_NOTES = {
+    "sha256": "Cryptographic hash -- exact file identity",
+    "phash": "Perceptual hash (DCT) -- visual similarity, not cryptographic",
+    "dhash": "Difference hash -- visual similarity, not cryptographic",
+    "clip-vit-l14": (
+        "CLIP ViT-L/14 image embedding -- semantic similarity used to retrieve "
+        "candidates; not an identity and not cryptographic"
+    ),
+}
+
+
 class EvidenceService:
 
     def build_evidence_package(
@@ -103,13 +118,16 @@ class EvidenceService:
                 fp_by_algorithm[fp.algorithm] = {
                     "algorithm": fp.algorithm,
                     "algorithm_version": fp.algorithm_version,
-                    "value": fp.value,
+                    # An embedding is 768 floats; the package carries its
+                    # identity, not the vector.
+                    "value": (
+                        None if fp.algorithm in _EMBEDDING_ALGORITHMS else fp.value
+                    ),
                     "scope": fp.scope,
                     "evidence_category": "FACT" if fp.algorithm == "sha256" else "OBSERVATION",
-                    "note": (
-                        "Cryptographic hash -- exact file identity"
-                        if fp.algorithm == "sha256"
-                        else "Perceptual hash -- visual similarity (not cryptographic)"
+                    "note": _FINGERPRINT_NOTES.get(
+                        fp.algorithm,
+                        f"{fp.algorithm} -- visual similarity (not cryptographic)",
                     ),
                 }
 
@@ -162,12 +180,34 @@ class EvidenceService:
                 "method": match.method,
                 "algorithm": match.algorithm,
                 "rank": match.rank,
+                # VERIFIED_MATCH | SIMILAR_UNVERIFIED | NO_MATCH, or None for a
+                # match recorded before verification existed.
+                "verification_status": match.verification_status,
+                "verification": match.verification,
             }
             if match.match_type == "local":
                 similarity_evidence["local_matches"].append(entry)
             else:
                 similarity_evidence["external_matches"].append(entry)
         similarity_evidence["total_matches"] = len(similarity_matches)
+        similarity_evidence["verified_matches"] = sum(
+            1 for m in similarity_matches if m.verification_status == "VERIFIED_MATCH"
+        )
+
+        # ── AI-generation Evidence ────────────────────────────────────────────
+        # Its own section: a different question from manipulation, decided by a
+        # different detector, and never blended into ``overall_assessment``.
+        assessment_record = repo.get_assessment_for_analysis(db, analysis_id)
+        ai_generation = (
+            assessment_record.ai_generation if assessment_record else None
+        ) or {"status": "UNAVAILABLE", "rationale": "Not assessed for this analysis."}
+        ai_generation_evidence = {
+            **ai_generation,
+            "evidence_category": (
+                "OBSERVATION" if ai_generation.get("status") in
+                ("AI_GENERATION_INDICATED", "NOT_INDICATED") else "UNCERTAINTY"
+            ),
+        }
 
         # ── Source Evidence ───────────────────────────────────────────────────
         source_evidence = {
@@ -233,6 +273,7 @@ class EvidenceService:
             "fingerprint_evidence": fp_by_algorithm,
             "detection_evidence": detection_evidence,
             "similarity_evidence": similarity_evidence,
+            "ai_generation_evidence": ai_generation_evidence,
             "source_evidence": source_evidence,
             "provenance_evidence": provenance_evidence,
             "classified_evidence": classified_items,
@@ -283,6 +324,21 @@ class EvidenceService:
             and _plain(det.execution_status) in ("COMPLETED", "INCONCLUSIVE")
             for det in detections
         )
+        # The AI-generation detector's limitations apply to every score it
+        # produced, positive or not -- a low score is where they matter most.
+        for det in detections:
+            if det.detector == "UnivFDDetector" and _plain(det.execution_status) == "COMPLETED":
+                for lim in (det.detector_metadata or {}).get("limitations", []):
+                    limitations.append(f"AI generation: {lim}")
+            # TruFor's own limitations (tiled inference) qualify the result it
+            # did produce; the loop above already covers its unavailable and
+            # inconclusive runs.
+            elif det.detector == "TruForDetector" and _plain(det.assessment) not in (
+                "UNAVAILABLE", "INCONCLUSIVE"
+            ):
+                for lim in (det.detector_metadata or {}).get("limitations", []):
+                    limitations.append(f"TruFor: {lim}")
+
         if not learned_ran:
             limitations.append(
                 "UNCERTAINTY: No learned forgery-localisation model (TruFor) "

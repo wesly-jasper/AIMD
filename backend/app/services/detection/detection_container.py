@@ -13,6 +13,7 @@ def create_detection_router() -> MediaDetectionRouter:
     """Create a fully-wired MediaDetectionRouter."""
     # Image detectors
     trufor_detector = DetectorFactory.create_trufor()
+    univfd_detector = DetectorFactory.create_univfd()
     forensic_image_detector = DetectorFactory.create_forensic_image_detector()
     face_detector = DetectorFactory.create_face_detector()
     object_detector = DetectorFactory.create_object_detector()
@@ -23,6 +24,7 @@ def create_detection_router() -> MediaDetectionRouter:
     image_detectors = [
         d for d in [
             trufor_detector,
+            univfd_detector,
             forensic_image_detector,
             face_detector,
             object_detector,
