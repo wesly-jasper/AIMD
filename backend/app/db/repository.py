@@ -16,6 +16,7 @@ from app.db.models import (
     EvidenceItemRecord, ReportRecord,
     CaseRecord, ObservationRecord, FindingRecord, FindingObservationRecord,
     AssessmentRecord, ReferenceImageRecord, ReferenceFingerprintRecord,
+    InvestigationRecord,
 )
 
 #: The only two bearings an observation may have on a finding.
@@ -614,3 +615,45 @@ def upsert_report(db: Session, analysis_id: str, data: dict) -> ReportRecord:
 
 def get_report_for_analysis(db: Session, analysis_id: str) -> Optional[ReportRecord]:
     return db.query(ReportRecord).filter_by(analysis_id=analysis_id).first()
+
+
+# ── Investigations ────────────────────────────────────────────────────────────
+
+def create_investigation(db: Session, data: dict) -> InvestigationRecord:
+    record = InvestigationRecord(**data)
+    db.add(record)
+    db.commit()
+    db.refresh(record)
+    return record
+
+
+def get_investigation(db: Session, investigation_id: str) -> Optional[InvestigationRecord]:
+    return db.get(InvestigationRecord, investigation_id)
+
+
+def update_investigation(db: Session, investigation_id: str, **fields) -> Optional[InvestigationRecord]:
+    record = db.get(InvestigationRecord, investigation_id)
+    if record is None:
+        return None
+    for k, v in fields.items():
+        setattr(record, k, v)
+    db.commit()
+    db.refresh(record)
+    return record
+
+
+def get_latest_investigation(db: Session, analysis_id: str) -> Optional[InvestigationRecord]:
+    return (
+        db.query(InvestigationRecord)
+        .filter_by(analysis_id=analysis_id)
+        .order_by(InvestigationRecord.created_at.desc(), InvestigationRecord.id.desc())
+        .first()
+    )
+
+
+def count_investigations_since(db: Session, owner: str, since: datetime) -> int:
+    return (
+        db.query(InvestigationRecord)
+        .filter(InvestigationRecord.requested_by == owner, InvestigationRecord.created_at >= since)
+        .count()
+    )

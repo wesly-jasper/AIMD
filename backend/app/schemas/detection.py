@@ -331,6 +331,15 @@ class AnalysisRequest(BaseModel):
     source_url: Optional[str] = Field(default=None, max_length=2048)
 
 
+class InvestigationRequest(BaseModel):
+    """Optional input to POST /analysis/{id}/investigate."""
+    # A URL the agent may check with verify_source_match, through the SSRF
+    # guard, alongside those already in the analysis's results.
+    source_url: Optional[str] = Field(
+        default=None, min_length=10, max_length=2048, pattern=r"^https?://\S+$"
+    )
+
+
 class AnalysisResponse(BaseModel):
     """
     Response from a pipeline analysis request.

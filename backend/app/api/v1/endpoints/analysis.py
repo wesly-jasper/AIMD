@@ -4,19 +4,25 @@
 POST /api/v1/analysis  -- Run the complete forensic pipeline on a media_id.
 GET  /api/v1/analysis/{analysis_id}  -- Retrieve analysis status and results.
 GET  /api/v1/analysis/  -- List analyses.
+POST /api/v1/analysis/{analysis_id}/investigate  -- Start a Nemotron investigation.
+GET  /api/v1/analysis/{analysis_id}/investigation  -- The latest investigation.
 """
 import logging
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request
 from sqlalchemy.orm import Session
 
 from app.core.auth import User, get_current_user
+from app.core.config import settings
 from app.core.rate_limit import ANALYSIS_LIMIT, limiter
 from app.db.database import get_db
 from app.db import repository as repo
+from app.services.agent import nemotron_agent
+from app.services.agent.nemotron_agent import NemotronAgent
 from app.services.provenance.timeline import build_timeline
-from app.schemas.detection import AnalysisRequest, AnalysisResponse
+from app.schemas.detection import AnalysisRequest, AnalysisResponse, InvestigationRequest
 from app.services.audit.audit_log import AuditAction, record_event
 from app.services.orchestration.analysis_pipeline import AnalysisPipeline
 
@@ -25,6 +31,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/analysis", tags=["Analysis"])
 
 _pipeline = AnalysisPipeline()
+_agent = NemotronAgent()
 
 
 @router.post(
@@ -290,3 +297,105 @@ def list_analyses(
         ],
         "count": len(items),
     }
+
+
+# ── Investigation agent ───────────────────────────────────────────────────────
+
+def _aware(value: datetime) -> datetime:
+    # SQLite hands back naive datetimes for timezone-aware columns.
+    return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+
+
+@router.post(
+    "/{analysis_id}/investigate",
+    status_code=202,
+    summary="Start a Nemotron investigation of a finished analysis",
+)
+def start_investigation(
+    analysis_id: str,
+    background_tasks: BackgroundTasks,
+    body: Optional[InvestigationRequest] = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Ask NVIDIA Nemotron to explain this analysis using AIMD's read-only tools.
+
+    Runs in the background; poll GET .../investigation for the result. The
+    summary is INFERENCE grounded in the cited tool results, never forensic
+    proof, and the analysis itself is never changed. Without a model credential
+    the investigation is stored as UNAVAILABLE straight away.
+    """
+    analysis = repo.get_owned_analysis(db, analysis_id, current_user.username)
+    if not analysis:
+        raise HTTPException(status_code=404, detail="Analysis not found")
+    if analysis.status in ("QUEUED", "PROCESSING"):
+        raise HTTPException(status_code=409, detail="Analysis has not finished")
+
+    latest = repo.get_latest_investigation(db, analysis_id)
+    if latest is not None and latest.status == nemotron_agent.RUNNING:
+        if _aware(latest.created_at) > nemotron_agent.stale_before():
+            raise HTTPException(status_code=409, detail="An investigation of this analysis is already running")
+        # Long past its timeout: the run was lost (e.g. a restart). Close it.
+        repo.update_investigation(
+            db, latest.id, status=nemotron_agent.FAILED,
+            error_message="run lost: never finished within its time limit",
+            completed_at=datetime.now(timezone.utc),
+        )
+
+    since = datetime.now(timezone.utc) - timedelta(hours=1)
+    if repo.count_investigations_since(db, current_user.username, since) >= settings.agent_hourly_limit:
+        raise HTTPException(
+            status_code=429,
+            detail=f"Hourly limit reached: {settings.agent_hourly_limit} investigations per hour",
+        )
+
+    source_url = body.source_url if body else None
+    reason = _agent.unavailable_reason()
+    record = repo.create_investigation(db, {
+        "analysis_id": analysis_id,
+        "requested_by": current_user.username,
+        "status": nemotron_agent.UNAVAILABLE if reason else nemotron_agent.RUNNING,
+        "model": settings.nemotron_model,
+        "error_message": reason,
+        "completed_at": datetime.now(timezone.utc) if reason else None,
+    })
+    record_event(
+        db,
+        actor=current_user.username,
+        action=AuditAction.INVESTIGATION_STARTED,
+        case_id=analysis.media.case_id if analysis.media else None,
+        media_id=analysis.media_id,
+        analysis_id=analysis_id,
+        details={
+            "investigation_id": record.id,
+            "model": settings.nemotron_model,
+            "status": record.status,
+            "source_url": source_url,
+        },
+    )
+    if not reason:
+        background_tasks.add_task(nemotron_agent.run_investigation, record.id, _agent, source_url)
+    return {
+        "investigation_id": record.id,
+        "analysis_id": analysis_id,
+        "status": record.status,
+        "error_message": reason,
+    }
+
+
+@router.get(
+    "/{analysis_id}/investigation",
+    summary="The latest investigation of an analysis",
+)
+def get_investigation(
+    analysis_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    if not repo.get_owned_analysis(db, analysis_id, current_user.username):
+        raise HTTPException(status_code=404, detail="Analysis not found")
+    record = repo.get_latest_investigation(db, analysis_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail="No investigation for this analysis")
+    return nemotron_agent.serialise_investigation(record)

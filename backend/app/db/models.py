@@ -208,6 +208,9 @@ class AnalysisRecord(Base):
     report: Mapped[Optional["ReportRecord"]] = sa_relationship(
         back_populates="analysis", cascade="all, delete-orphan", uselist=False
     )
+    investigations: Mapped[list["InvestigationRecord"]] = sa_relationship(
+        back_populates="analysis", cascade="all, delete-orphan"
+    )
 
 
 # ── Frames ────────────────────────────────────────────────────────────────────
@@ -618,6 +621,47 @@ class AssessmentRecord(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
     analysis: Mapped["AnalysisRecord"] = sa_relationship(back_populates="assessment_record")
+
+
+# ── Investigation agent ───────────────────────────────────────────────────────
+
+class InvestigationRecord(Base):
+    """
+    One run of the Nemotron investigation agent over a finished analysis.
+
+    Kept apart from the analysis's own results, which it reads and never
+    changes. The summary is model output and is labelled INFERENCE; the tool
+    trace is what AIMD's own tools returned and is labelled FACT or OBSERVATION
+    per call. ``flags`` lists what the grounding guard removed from the summary
+    and why, so a reader can see what the model claimed that no tool supported.
+    """
+    __tablename__ = "investigations"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=_uuid)
+    analysis_id: Mapped[str] = mapped_column(
+        String, ForeignKey("analyses.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    requested_by: Mapped[str] = mapped_column(String(150), nullable=False, index=True)
+    status: Mapped[str] = mapped_column(
+        String, nullable=False, default="RUNNING"
+    )  # RUNNING|COMPLETED|UNAVAILABLE|FAILED
+    model: Mapped[Optional[str]] = mapped_column(String)
+    summary: Mapped[Optional[str]] = mapped_column(Text)
+    summary_category: Mapped[str] = mapped_column(String, nullable=False, default="INFERENCE")
+    # [{sentence, tool_call_ids}]: which tool results each sentence cites.
+    citations: Mapped[Optional[list]] = mapped_column(JSON)
+    flags: Mapped[Optional[list]] = mapped_column(JSON)
+    # [{id, name, arguments, category, result | error, latency_ms}]
+    tool_calls: Mapped[Optional[list]] = mapped_column(JSON)
+    steps: Mapped[Optional[int]] = mapped_column(Integer)
+    # {prompt_tokens, completion_tokens, total_tokens, calls: [{latency_ms, ...}]}
+    usage: Mapped[Optional[dict]] = mapped_column(JSON)
+    duration_ms: Mapped[Optional[int]] = mapped_column(Integer)
+    error_message: Mapped[Optional[str]] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+
+    analysis: Mapped["AnalysisRecord"] = sa_relationship(back_populates="investigations")
 
 
 # ── Audit trail ───────────────────────────────────────────────────────────────

@@ -1,0 +1,61 @@
+{
+  "_comment": "Hand-written in the exact shape of OpenAI-compatible chat.completion responses (as Nebius Token Factory returns them) for the analysis seeded by tests/integration/test_investigation_agent.py. It is NOT a capture of a live call: no live Nemotron call has been made yet. The last answer deliberately includes a fabricated URL, date and percentage, which the grounding guard must strip and flag.",
+  "responses": [
+    {
+      "id": "chatcmpl-rec-1",
+      "object": "chat.completion",
+      "created": 1792800000,
+      "model": "nvidia/nemotron-3-super-120b-a12b",
+      "choices": [{
+        "index": 0,
+        "finish_reason": "tool_calls",
+        "message": {
+          "role": "assistant",
+          "content": null,
+          "tool_calls": [
+            {"id": "call_overview", "type": "function",
+             "function": {"name": "get_analysis_overview", "arguments": "{}"}},
+            {"id": "call_detections", "type": "function",
+             "function": {"name": "list_detections", "arguments": "{}"}}
+          ]
+        }
+      }],
+      "usage": {"prompt_tokens": 1830, "completion_tokens": 64, "total_tokens": 1894}
+    },
+    {
+      "id": "chatcmpl-rec-2",
+      "object": "chat.completion",
+      "created": 1792800003,
+      "model": "nvidia/nemotron-3-super-120b-a12b",
+      "choices": [{
+        "index": 0,
+        "finish_reason": "tool_calls",
+        "message": {
+          "role": "assistant",
+          "content": null,
+          "tool_calls": [
+            {"id": "call_sources", "type": "function",
+             "function": {"name": "get_sources", "arguments": "{}"}}
+          ]
+        }
+      }],
+      "usage": {"prompt_tokens": 2710, "completion_tokens": 31, "total_tokens": 2741}
+    },
+    {
+      "id": "chatcmpl-rec-3",
+      "object": "chat.completion",
+      "created": 1792800007,
+      "model": "nvidia/nemotron-3-super-120b-a12b",
+      "choices": [{
+        "index": 0,
+        "finish_reason": "stop",
+        "message": {
+          "role": "assistant",
+          "content": "<think>The overview, detections and sources are enough to answer.</think>\n**Summary**\nThe manipulation assessment is INCONCLUSIVE, with LIMITED evidence strength [T1]. TruFor returned a raw model score of 0.87, which is not a probability, and ELA was unavailable [T2]. AIMD found the image published at https://example.org/news/photo.jpg on 2019-05-04 [T3]. It first appeared at https://fabricated.example.com/original on 2018-01-01 with 99% certainty [T3, T9]. Treat this as an interpretation of the results, not forensic proof.",
+          "tool_calls": null
+        }
+      }],
+      "usage": {"prompt_tokens": 3120, "completion_tokens": 142, "total_tokens": 3262}
+    }
+  ]
+}

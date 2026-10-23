@@ -33,6 +33,8 @@ The full machine-readable spec is `docs/openapi.json`
 | POST | `/analysis/` | Run every check on a file (`media_id`). |
 | GET | `/analysis/` | Your results. `media_id` filters by file. |
 | GET | `/analysis/{id}` | One result: assessment, findings, observations, every check's availability and run state, run provenance. |
+| POST | `/analysis/{id}/investigate` | Start a Nemotron investigation of a finished result (202; runs in the background). Optional body `{"source_url": "https://..."}`. 409 while the analysis or another investigation is running, 429 past `AGENT_HOURLY_LIMIT` per hour. Without `NEBIUS_API_KEY` it is stored as `UNAVAILABLE` at once. |
+| GET | `/analysis/{id}/investigation` | The latest investigation: `status` (RUNNING / COMPLETED / UNAVAILABLE / FAILED), the summary labelled `INFERENCE`, each sentence's citations, what the grounding guard removed (`flags`), the tool trace with FACT / OBSERVATION labels, steps, token usage and latency. |
 
 ## Folders
 

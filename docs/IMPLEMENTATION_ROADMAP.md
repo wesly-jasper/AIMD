@@ -245,14 +245,14 @@ Also fixed while here (leaks of the Phase 1d class): `POST /media/upload` return
 
 Per the audit: **no credential is configured.** Build to contract, test with mocks, document config, claim nothing live.
 
-- [ ] Backend-only Nebius client (OpenAI-compatible); key never reaches the frontend
-- [ ] NVIDIA Nemotron as the model (hackathon requirement)
-- [ ] **Bounded** tool registry — no shell, no arbitrary code, no arbitrary file access, no arbitrary network
-- [ ] LLM output labelled as interpretation, **never** independent forensic proof
-- [ ] Graceful `UNAVAILABLE` when no credential
-- [ ] `openai` + `mediapipe` added to `requirements.txt`
-- [ ] Mocked tests; documented `.env.example` keys
-- [ ] Record honestly whether live inference was ever executed
+- [x] Backend-only Nebius client (OpenAI-compatible); key never reaches the frontend
+- [x] NVIDIA Nemotron as the model (hackathon requirement)
+- [x] **Bounded** tool registry — no shell, no arbitrary code, no arbitrary file access, no arbitrary network
+- [x] LLM output labelled as interpretation, **never** independent forensic proof
+- [x] Graceful `UNAVAILABLE` when no credential
+- [x] `openai` + `mediapipe` added to `requirements.txt`
+- [x] Mocked tests; documented `.env.example` keys
+- [x] Record honestly whether live inference was ever executed — **not executed.** No `NEBIUS_API_KEY` has been available. The recorded-response test (`tests/fixtures/nemotron_investigation_recorded.json`) is hand-written in Token Factory's response format, not captured from a call. `test_live_token_factory_investigation` (marker `live`) runs the real request once the key is exported, and skips until then.
 
 ---
 

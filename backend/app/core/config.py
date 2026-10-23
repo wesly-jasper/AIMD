@@ -180,6 +180,20 @@ class Settings(BaseSettings):
     nebius_base_url: str = "https://api.tokenfactory.nebius.com/v1/"
     nemotron_model: str = "nvidia/nemotron-3-super-120b-a12b"
 
+    # ── Investigation agent ───────────────────────────────────────────────────
+    # Bounds on one investigation: model calls, wall-clock seconds for the whole
+    # run, client retries per call, completion tokens per call, and how many
+    # pages verify_source_match may fetch.
+    agent_enabled: bool = True
+    agent_max_steps: int = 8
+    agent_timeout_seconds: float = 60.0
+    agent_max_retries: int = 2
+    agent_max_tokens: int = 2048
+    agent_max_url_checks: int = 2
+    # Investigations per account in any rolling hour. Counted from the database,
+    # like the upload quota, so public demo traffic cannot drain the credits.
+    agent_hourly_limit: int = 10
+
     model_config = SettingsConfigDict(
         env_file=".env",
         extra="ignore",
