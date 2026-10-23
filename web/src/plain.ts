@@ -127,6 +127,8 @@ const CHECKS: Record<string, { name: string; what: string }> = {
   BaselineFaceDetector: { name: "Face finding", what: "Locates faces so face checks can run" },
   DeepLearningFaceDetector: { name: "Face finding", what: "Locates faces so face checks can run" },
   TruForDetector: { name: "Forgery model", what: "A trained model that looks for image forgeries" },
+  UnivFDDetector: { name: "AI-generation model", what: "A trained model that scores whether a model made the image" },
+  VideoTemporalAnalysisEngine: { name: "Frame-to-frame changes", what: "Sudden changes between sampled video frames" },
   YOLOv8ObjectDetector: { name: "Object recognition", what: "Lists what is in the picture; not evidence of editing" },
   BaselineObjectDetector: { name: "Object recognition", what: "Lists what is in the picture; not evidence of editing" },
   BaselineVideoDetector: { name: "Frame checks", what: "Image checks run across sampled video frames" },
@@ -135,7 +137,8 @@ const CHECKS: Record<string, { name: string; what: string }> = {
 };
 
 export function checkName(detector: string): string {
-  return CHECKS[detector]?.name ?? detector.replace(/([a-z])([A-Z])/g, "$1 $2");
+  // Unknown names: "UnivFDDetector" -> "Univ FD Detector", not "Univ FDDetector".
+  return CHECKS[detector]?.name ?? detector.replace(/([a-z])([A-Z])|([A-Z])([A-Z][a-z])/g, "$1$3 $2$4");
 }
 
 export function checkWhat(detector: string): string {

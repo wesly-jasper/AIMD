@@ -9,7 +9,7 @@ import type {
 /** Not assessed, said in so many words: an absent result never reads as a clean one. */
 export function Unavailable({ children }: { children: React.ReactNode }) {
   return (
-    <div className="unavailable" role="status">
+    <div className="unavailable-block" role="status">
       <span className="hatch" aria-hidden="true" />
       <span><strong>Unavailable.</strong> {children}</span>
     </div>
