@@ -9,12 +9,44 @@ Supports: images (JPEG/PNG/WebP/TIFF), video (MP4/AVI/MOV/MKV),
           audio (WAV/MP3/AAC/M4A).
 """
 import logging
+import math
+from numbers import Rational
 from pathlib import Path
 from typing import Any
 
 import cv2
 
 logger = logging.getLogger(__name__)
+
+
+def json_safe(value: Any) -> Any:
+    """
+    ``value`` as plain JSON types, or ``None`` where it has no JSON form.
+
+    Pillow returns EXIF rationals (exposure time, f-number, resolution, GPS
+    degrees) as ``IFDRational``, alone or inside tuples. They are not JSON
+    serialisable, so storing a camera photo's EXIF failed and its upload with
+    it. Rationals become floats (a zero denominator, which EXIF allows, becomes
+    ``None``); tuples become lists; bytes, NaN and infinities become ``None``.
+    """
+    if value is None or isinstance(value, (bool, str)):
+        return value.replace("\x00", "") if isinstance(value, str) else value
+    if isinstance(value, int):
+        return value
+    if isinstance(value, Rational):
+        return float(value.numerator) / value.denominator if value.denominator else None
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, (bytes, bytearray)):
+        return None
+    if isinstance(value, dict):
+        return {str(k): json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [json_safe(v) for v in value]
+    try:  # numpy scalars and the like
+        return json_safe(value.item())
+    except (AttributeError, ValueError):
+        return str(value)
 
 _IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".tiff", ".tif"}
 _VIDEO_EXTS = {".mp4", ".avi", ".mov", ".mkv", ".m4v"}
@@ -43,7 +75,8 @@ class MetadataExtractor:
         from app.services.provenance.c2pa_verifier import verify_c2pa
 
         meta["c2pa"] = verify_c2pa(file_path)
-        return meta
+        # Stored as JSON (media_metadata.raw_metadata and exif_data).
+        return json_safe(meta)
 
     # ── Images ────────────────────────────────────────────────────────────────
 
@@ -93,12 +126,15 @@ class MetadataExtractor:
             if raw_exif:
                 for tag_id, value in raw_exif.items():
                     tag_name = ExifTags.TAGS.get(tag_id, str(tag_id))
-                    # Skip binary blobs
-                    if isinstance(value, (str, int, float, tuple)):
+                    if tag_name == "GPSInfo" and isinstance(value, dict):
+                        value = {ExifTags.GPSTAGS.get(k, str(k)): v for k, v in value.items()}
+                    value = json_safe(value)
+                    # Binary blobs (MakerNote, thumbnails) have no JSON form.
+                    if value not in (None, {}, []):
                         exif[tag_name] = value
 
         except Exception as exc:
-            pass
+            logger.warning("EXIF extraction failed for %s: %s", file_path.name, exc)
 
         return exif
 

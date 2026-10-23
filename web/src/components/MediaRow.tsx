@@ -48,7 +48,7 @@ export function MediaRow({
         <span className="sub">{meta}</span>
       </div>
       <div className="media-result">
-        <VerdictTag category={latest?.assessment} />
+        <VerdictTag category={latest?.assessment} status={latest?.status} />
         <span className="sub num">{dateTime(latest?.created_at ?? item.created_at)}</span>
       </div>
       <div className="media-actions">

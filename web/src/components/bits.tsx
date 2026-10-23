@@ -16,12 +16,12 @@ export function TitleRow({ title, sub, actions }: { title: string; sub?: ReactNo
 }
 
 /** The result in a list row: a small mark and the short wording. */
-export function VerdictTag({ category }: { category: Category | null | undefined }) {
+export function VerdictTag({ category, status }: { category: Category | null | undefined; status?: string | null }) {
   const tone = category ? toneOf(category) : "none";
   return (
     <span className={"verdict-tag " + tone}>
       <span className="dot" aria-hidden="true" />
-      {shortVerdict(category)}
+      {shortVerdict(category, status)}
     </span>
   );
 }

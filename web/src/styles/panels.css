@@ -20,6 +20,8 @@
 .segmented.compact { display: inline-flex; width: auto; }
 .segmented.compact button { flex: none; height: 28px; padding: 0 12px; font-size: 13px; }
 
+.run-failed { margin: 14px 0; overflow-wrap: anywhere; }
+
 /* ---------- the two branches ---------- */
 .branch { display: flex; flex-direction: column; gap: 10px; }
 .branch .card-head { margin-bottom: 0; }

@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { deleteMedia, postJson } from "../api";
 import { AvailabilityMark, DeleteControl, ErrorBlock, ExecutionPill, Hash, Skeleton, TitleRow } from "../components/bits";
@@ -10,7 +10,7 @@ import { ReportCard } from "../components/Report";
 import { Shell } from "../components/Shell";
 import { POLARITY, SEMANTICS, count, dateTime, duration, familyLabel, score } from "../format";
 import { useResource } from "../hooks";
-import { checkName, verdict } from "../plain";
+import { analysisVerdict, checkName } from "../plain";
 import type { AnalysisDetail, Detection, MediaDetail, Observation } from "../types";
 
 function ObservationList({ ids, byId, onPoint, empty }: {
@@ -73,6 +73,19 @@ export function Result() {
     new Set((d?.observations ?? []).filter((o) => o.polarity === "ANOMALY_OBSERVED").map((o) => o.detection_id)),
   ), [d]);
   const name = media.data?.original_filename ?? "this file";
+  const failed = d?.status === "FAILED";
+  const running = d?.status === "QUEUED" || d?.status === "PROCESSING";
+  // Only a finished run has evidence to show; a failed or unfinished one would
+  // fill every panel with "Unavailable".
+  const finished = d != null && !failed && !running;
+
+  // Re-read while the run is still going.
+  const { reload } = a;
+  useEffect(() => {
+    if (!running) return;
+    const t = window.setTimeout(reload, 2500);
+    return () => window.clearTimeout(t);
+  }, [running, d, reload]);
 
   if (a.error) {
     return (
@@ -83,7 +96,7 @@ export function Result() {
     );
   }
 
-  const v = verdict(d?.assessment_detail?.category ?? d?.assessment, d?.evidence_strength);
+  const v = analysisVerdict(d?.status, d?.assessment_detail?.category ?? d?.assessment, d?.evidence_strength);
   const flagged = regions.filter((r) => r.anomaly);
   const finding = d?.findings[0];
   const dims = media.data?.metadata.width && media.data.metadata.height
@@ -109,7 +122,7 @@ export function Result() {
       <TitleRow
         title={d ? name : "Loading result…"}
         sub={d ? (
-          <>Checked <span className="num">{dateTime(d.created_at)}</span>{dims ? <> · <span className="num">{dims}</span></> : null}{d.status === "PARTIAL" ? " · some steps did not finish" : ""}</>
+          <>{failed ? "Check failed" : running ? "Started" : "Checked"} <span className="num">{dateTime(d.created_at)}</span>{dims ? <> · <span className="num">{dims}</span></> : null}{d.status === "PARTIAL" ? " · some steps did not finish" : ""}</>
         ) : undefined}
         actions={d && (
           <>
@@ -126,7 +139,7 @@ export function Result() {
             <EvidenceView mediaId={d.media_id} mediaType={d.media_type} regions={regions}
               highlight={point ? new Set([point]) : null} alt={`The checked file: ${name}`} videoRef={videoRef} />
           ) : <div className="evidence-frame loading" />}
-          {d && (
+          {finished && (
             <p className="media-caption">
               {flagged.length > 0 && <span className="area-mark" aria-hidden="true" />}
               <span>
@@ -143,13 +156,28 @@ export function Result() {
             <>
               <h2 id="verdict-h" className="verdict">{v.headline}</h2>
               <p className="explanation">{v.explanation}</p>
-              <WhatWeChecked detections={d.detections} observations={d.observations} onPoint={setPoint} />
+              {failed ? (
+                <>
+                  <div className="error-block run-failed" role="alert">
+                    <span className="error-dot" aria-hidden="true" />
+                    <span>{d.error_message ? <>Reason: {d.error_message}</> : "No reason was recorded."}</span>
+                  </div>
+                  <button className="btn primary" onClick={rerun} disabled={rerunning}>{rerunning ? "Checking…" : "Try again"}</button>
+                </>
+              ) : running ? (
+                <div className="inv-loading" role="status">
+                  <span className="spinner" aria-hidden="true" />
+                  <span className="sub-inline">Running the checks…</span>
+                </div>
+              ) : (
+                <WhatWeChecked detections={d.detections} observations={d.observations} onPoint={setPoint} />
+              )}
             </>
           )}
         </section>
       </div>
 
-      {d && (
+      {finished && (
         <>
           <BranchCards d={d} />
           {d.media_type === "image" ? (
@@ -164,12 +192,12 @@ export function Result() {
             </>
           )}
           <SourcesCard d={d} />
-          <InvestigationCard analysisId={d.analysis_id} finished={d.status !== "QUEUED" && d.status !== "PROCESSING"} />
+          <InvestigationCard analysisId={d.analysis_id} finished />
           <ReportCard analysisId={d.analysis_id} />
         </>
       )}
 
-      {d && (
+      {finished && (
         <details className="card technical">
           <summary>
             <span className="tech-title">Technical details</span>

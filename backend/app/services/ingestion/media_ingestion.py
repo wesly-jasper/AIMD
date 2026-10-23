@@ -20,6 +20,7 @@ from fastapi import UploadFile
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
+from app.core.safe_errors import safe_reason
 from app.db import repository as repo
 from app.services.preprocessing.metadata_extractor import MetadataExtractor
 from app.services.fingerprinting.fingerprint import FingerprintService
@@ -260,6 +261,9 @@ class MediaIngestionService:
                 logger.info("Media and metadata persisted to DB: %s", media_id)
             except Exception as exc:
                 logger.error("Failed to persist media to DB: %s", exc)
-                result["db_error"] = str(exc)
+                # Without this the session stays in a failed transaction and the
+                # caller's next query (the audit event) raises instead.
+                db.rollback()
+                result["db_error"] = safe_reason(exc)
 
         return result

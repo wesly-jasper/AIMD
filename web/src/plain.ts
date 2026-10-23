@@ -63,8 +63,37 @@ export function verdict(category: Category | null | undefined, strength: Strengt
   }
 }
 
+const RUNNING = new Set(["QUEUED", "PROCESSING"]);
+
+/**
+ * The headline for an analysis: its run status first, then its category. A
+ * failed or unfinished run has no category, and used to fall through to
+ * "This file hasn't been checked" -- untrue for a check that ran and failed.
+ */
+export function analysisVerdict(
+  status: string | null | undefined, category: Category | null | undefined, strength: Strength | null | undefined,
+): Verdict {
+  if (status === "FAILED") {
+    return {
+      headline: "The check failed",
+      explanation: "Something went wrong while checking this file, so there is no result. Nothing was concluded about the file.",
+      tone: "unsure",
+    };
+  }
+  if (status && RUNNING.has(status)) {
+    return {
+      headline: "Checking this file…",
+      explanation: "The checks are running. A large image can take a minute or two; this page updates when they finish.",
+      tone: "unsure",
+    };
+  }
+  return verdict(category, strength);
+}
+
 /** Short form for lists. */
-export function shortVerdict(category: Category | null | undefined): string {
+export function shortVerdict(category: Category | null | undefined, status?: string | null): string {
+  if (status === "FAILED") return "Check failed";
+  if (status && RUNNING.has(status)) return "Checking…";
   switch (category) {
     case "LIKELY_MANIPULATED": return "Strong signs of editing";
     case "LIKELY_AI_GENERATED": return "Signs of AI generation";

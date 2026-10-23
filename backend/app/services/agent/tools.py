@@ -34,6 +34,7 @@ from typing import Any, Callable, Optional
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from sqlalchemy.orm import Session
 
+from app.core.safe_errors import scrub
 from app.db import repository as repo
 from app.db.models import AnalysisRecord
 from app.services.fingerprinting.fingerprint import EMBEDDING_ALGORITHM
@@ -105,7 +106,7 @@ def get_analysis_overview(ctx: ToolContext, analysis: AnalysisRecord, args: NoAr
             "evidence_strength": analysis.evidence_strength,
             "created_at": _iso(analysis.created_at),
             "completed_at": _iso(analysis.completed_at),
-            "error_message": _text(analysis.error_message),
+            "error_message": _text(scrub(analysis.error_message)),
         },
         "media": {
             "media_type": media.media_type,

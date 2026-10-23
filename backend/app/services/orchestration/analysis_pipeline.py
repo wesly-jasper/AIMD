@@ -31,6 +31,7 @@ from urllib.parse import urlsplit
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
+from app.core.safe_errors import safe_reason, scrub
 from app.db import repository as repo
 from app.db.models import AnalysisRecord
 from app.schemas.detection import Assessment, EvidenceStrength
@@ -278,7 +279,7 @@ class AnalysisPipeline:
             logger.error("[%s] Pipeline FAILED: %s", analysis_id, exc, exc_info=True)
             db.rollback()
             repo.update_analysis_status(
-                db, analysis_id, status="FAILED", error_message=str(exc)
+                db, analysis_id, status="FAILED", error_message=safe_reason(exc)
             )
             try:
                 self._finish_run(analysis_id, db, started)
@@ -288,7 +289,7 @@ class AnalysisPipeline:
                 "analysis_id": analysis_id,
                 "media_id": media_id,
                 "status": "FAILED",
-                "error": str(exc),
+                "error": safe_reason(exc),
                 "stage_failures": stage_failures,
             }
 
@@ -319,7 +320,8 @@ class AnalysisPipeline:
             return metadata
         except Exception as exc:
             logger.warning("Metadata extraction failed: %s", exc)
-            failures.append(f"metadata: {exc}")
+            db.rollback()
+            failures.append(f"metadata: {safe_reason(exc)}")
             return {}
 
     def _run_frame_extraction(
@@ -357,7 +359,8 @@ class AnalysisPipeline:
             return frames, keyframes
         except Exception as exc:
             logger.warning("Frame extraction failed: %s", exc)
-            failures.append(f"frame_extraction: {exc}")
+            db.rollback()
+            failures.append(f"frame_extraction: {safe_reason(exc)}")
             return [], []
 
     def _run_detection(
@@ -434,10 +437,12 @@ class AnalysisPipeline:
                     and not outside_verdict
                 )
                 if is_gap or meta.get("failure_messages"):
+                    # A detector's failure_messages can carry exception text.
+                    reason = scrub(str(status_reason or meta.get("failure_messages") or ""))
                     failures.append(
                         f"detection: {det_data.get('detector', 'unknown')} incomplete "
                         f"[{availability}/{execution_status}]: "
-                        f"{status_reason or meta.get('failure_messages') or 'detector did not complete'}"
+                        f"{reason or 'detector did not complete'}"
                     )
 
                 repo.create_detection(db, {
@@ -462,7 +467,8 @@ class AnalysisPipeline:
                 })
         except Exception as exc:
             logger.warning("Detection stage failed: %s", exc)
-            failures.append(f"detection: {exc}")
+            db.rollback()
+            failures.append(f"detection: {safe_reason(exc)}")
 
     def _run_fingerprinting(
         self,
@@ -485,7 +491,8 @@ class AnalysisPipeline:
                 repo.bulk_create_fingerprints(db, records)
         except Exception as exc:
             logger.warning("Fingerprinting failed: %s", exc)
-            failures.append(f"fingerprinting: {exc}")
+            db.rollback()
+            failures.append(f"fingerprinting: {safe_reason(exc)}")
 
     def _run_similarity(
         self,
@@ -543,7 +550,8 @@ class AnalysisPipeline:
                 repo.bulk_create_similarity_matches(db, matches_to_save)
         except Exception as exc:
             logger.warning("Similarity search failed: %s", exc)
-            failures.append(f"similarity: {exc}")
+            db.rollback()
+            failures.append(f"similarity: {safe_reason(exc)}")
 
     def _run_source_tracing(
         self,
@@ -615,7 +623,8 @@ class AnalysisPipeline:
                 repo.bulk_create_sources(db, sources_to_save)
         except Exception as exc:
             logger.warning("Source tracing failed: %s", exc)
-            failures.append(f"source_tracing: {exc}")
+            db.rollback()
+            failures.append(f"source_tracing: {safe_reason(exc)}")
 
     def _run_provenance(
         self,
@@ -681,7 +690,8 @@ class AnalysisPipeline:
             repo.upsert_provenance_graph(db, analysis_id, nodes, edges)
         except Exception as exc:
             logger.warning("Provenance failed: %s", exc)
-            failures.append(f"provenance: {exc}")
+            db.rollback()
+            failures.append(f"provenance: {safe_reason(exc)}")
 
     def _run_evidence(
         self,
@@ -810,7 +820,8 @@ class AnalysisPipeline:
                 repo.bulk_create_evidence(db, items)
         except Exception as exc:
             logger.warning("Evidence generation failed: %s", exc)
-            failures.append(f"evidence: {exc}")
+            db.rollback()
+            failures.append(f"evidence: {safe_reason(exc)}")
 
     def _run_report(
         self,
@@ -832,7 +843,8 @@ class AnalysisPipeline:
             })
         except Exception as exc:
             logger.warning("Report generation failed: %s", exc)
-            failures.append(f"report: {exc}")
+            db.rollback()
+            failures.append(f"report: {safe_reason(exc)}")
 
     def _compute_final_assessment(
         self, analysis_id: str, db: Session
@@ -1100,7 +1112,7 @@ class AnalysisPipeline:
         except Exception as exc:
             db.rollback()
             logger.warning("Forensic record failed: %s", exc)
-            failures.append(f"forensic_record: {exc}")
+            failures.append(f"forensic_record: {safe_reason(exc)}")
 
     @staticmethod
     def _describe_observation(det, polarity: str) -> str:

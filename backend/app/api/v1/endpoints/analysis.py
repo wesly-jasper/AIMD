@@ -22,6 +22,7 @@ from sqlalchemy.orm import Session
 from app.core.auth import User, get_current_user
 from app.core.config import settings
 from app.core.rate_limit import ANALYSIS_LIMIT, limiter
+from app.core.safe_errors import scrub
 from app.db.database import get_db
 from app.db import repository as repo
 from app.services.agent import nemotron_agent
@@ -157,7 +158,8 @@ def get_analysis(
         "suspicious_segments": suspicious_segments,
         "created_at": analysis.created_at.isoformat() if analysis.created_at else None,
         "completed_at": analysis.completed_at.isoformat() if analysis.completed_at else None,
-        "error_message": analysis.error_message,
+        # Also scrubbed on read: rows written before safe_reason hold raw text.
+        "error_message": scrub(analysis.error_message),
         "run": {
             "requested_by": analysis.requested_by,
             "software_version": analysis.software_version,
