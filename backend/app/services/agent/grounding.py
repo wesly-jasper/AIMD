@@ -27,8 +27,13 @@ from typing import Any, Iterable
 UNVERIFIED = "[unverified]"
 
 _THINK = re.compile(r"<think>.*?</think>", re.S | re.I)
-_CITATION = re.compile(r"\[\s*(T\d+(?:\s*[,;]\s*T\d+)*)\s*\]")
-_URL = re.compile(r"https?://[^\s<>\"'\]\)]+")
+# Nemotron often cites in CJK brackets (【T1】) rather than [T1]; both count, and
+# the cleaned summary always uses [T1].
+_ID_SEPARATOR = r"[,;，、]"
+_CITATION = re.compile(
+    r"[\[【［〔]\s*(T\d+(?:\s*" + _ID_SEPARATOR + r"\s*T\d+)*)\s*[\]】］〕]"
+)
+_URL = re.compile(r"https?://[^\s<>\"'\[\]\)【】［］〔〕]+")
 _TIMESTAMP = re.compile(
     r"\b\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})?)?"
     r"|\b\d{4}:\d{2}:\d{2} \d{2}:\d{2}:\d{2}"
@@ -118,8 +123,8 @@ def _check_sentence(sentence: str, evidence: Evidence, flags: list[dict]) -> tup
     cited: list[str] = []
 
     def citation(m: re.Match) -> str:
-        ids = [i.strip() for i in re.split(r"[,;]", m.group(1))]
-        known = [i for i in ids if i in evidence.ids]
+        ids = [i.strip() for i in re.split(_ID_SEPARATOR, m.group(1))]
+        known = list(dict.fromkeys(i for i in ids if i in evidence.ids))
         for i in ids:
             if i not in evidence.ids:
                 flags.append({"type": "unknown_citation", "value": i, "sentence": sentence})

@@ -252,7 +252,7 @@ Per the audit: **no credential is configured.** Build to contract, test with moc
 - [x] Graceful `UNAVAILABLE` when no credential
 - [x] `openai` + `mediapipe` added to `requirements.txt`
 - [x] Mocked tests; documented `.env.example` keys
-- [x] Record honestly whether live inference was ever executed — **not executed.** No `NEBIUS_API_KEY` has been available. The recorded-response test (`tests/fixtures/nemotron_investigation_recorded.json`) is hand-written in Token Factory's response format, not captured from a call. `test_live_token_factory_investigation` (marker `live`) runs the real request once the key is exported, and skips until then.
+- [x] Record honestly whether live inference was ever executed — **executed 2026-10-23.** `test_live_token_factory_investigation` (marker `live`) passed against Token Factory with `nvidia/nemotron-3-super-120b-a12b`: 3 model calls, 2 AIMD tools (`get_analysis_overview`, `list_detections`), about 7 s of model latency and about 5,400 tokens, with the summary's citations resolving to those calls. The first live run found that Nemotron cites as `【T1】` rather than `[T1]`; the grounding guard now accepts both. The recorded-response test (`tests/fixtures/nemotron_investigation_recorded.json`) is still hand-written in Token Factory's format, not a capture. The live test runs only with `NEBIUS_API_KEY` exported in the shell, and skips otherwise.
 
 ---
 

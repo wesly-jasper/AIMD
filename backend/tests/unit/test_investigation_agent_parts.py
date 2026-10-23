@@ -165,6 +165,13 @@ def test_unknown_citations_are_removed_and_uncited_claims_flagged():
     assert not out.grounded
 
 
+def test_cjk_bracket_citations_count_and_are_normalised():
+    # As the live model wrote them, URL and all.
+    out = ground("The score was 0.87【T1】. See https://example.org/a【T1、T1】.", RESULTS)
+    assert out.text == "The score was 0.87[T1]. See https://example.org/a[T1]."
+    assert out.flags == [] and [c["tool_call_ids"] for c in out.citations] == [["T1"], ["T1"]]
+
+
 def test_think_blocks_headings_and_list_numbers_are_not_claims():
     summary = "<think>secret 42</think>\n**Findings**\n## Sources\n1. The score was 0.87 [T1]."
     out = ground(summary, RESULTS)
