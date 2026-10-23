@@ -104,6 +104,28 @@ class Settings(BaseSettings):
     similarity_min_inliers: int = 20
     similarity_candidate_phash_distance: int = 20
     similarity_candidate_cosine: float = 0.80
+    # A crop fails the whole-frame pHash; it verifies instead when, after warping
+    # the candidate into the query's frame, the query lies inside it and the
+    # aligned content agrees. Measured on crops of 120 Commons images: true crops
+    # aligned pHash <= 6 (90 % <= 2), NCC mostly >= 0.92; burst shots and
+    # different speakers on the same stage NCC <= 0.91 or aligned pHash >= 6.
+    similarity_aligned_phash_max_distance: int = 4
+    similarity_aligned_ncc_min: float = 0.90
+    similarity_aligned_min_coverage: float = 0.90
+
+    # ── Reference corpus ──────────────────────────────────────────────────────
+    # Public images indexed by scripts/build_reference_corpus.py. Outside the
+    # evidence roots: these files are citations, not anyone's evidence.
+    reference_dir: Path = BASE_DIR / "storage" / "reference"
+    # Wikimedia asks every client to identify itself with a way to reach its
+    # operator (an email address or URL); anonymous clients are rate-limited.
+    wikimedia_contact: Optional[str] = None
+    # Search the indexed corpus for each image upload (no network at analysis time).
+    source_wikimedia_enabled: bool = True
+    # Fetch and check the URL a user supplies with an analysis (SSRF-guarded).
+    source_url_verification_enabled: bool = True
+    # Look up verified sources in the Wayback Machine (network at analysis time).
+    source_wayback_enabled: bool = True
 
     # ── Advanced Localization Detectors ─────────────────────────────────────
     copymove_enabled: bool = True

@@ -177,7 +177,8 @@ def test_resized_copy_is_verified(images):
                  "retrieved_by": ["phash", EMBEDDING_ALGORITHM]}
     status, verification = verify_candidate(images["copy"], candidate, images["original"])
     assert status == VERIFIED_MATCH
-    assert verification["gates"] == {"phash": True, "cosine": True, "geometry": True}
+    assert verification["gates"] == {"phash": True, "cosine": True, "geometry": True,
+                                     "aligned": True}
     assert verification["reasons"] == []
 
 
@@ -189,6 +190,69 @@ def test_lookalike_with_high_cosine_is_not_verified(images):
     assert status == SIMILAR_UNVERIFIED
     assert verification["gates"]["geometry"] is False
     assert any("ORB inliers" in r for r in verification["reasons"])
+
+
+def _crop(img, box, path, width=640):
+    part = img.crop(box)
+    part.thumbnail((width, width))
+    part.save(path, "JPEG", quality=80)
+    return path
+
+
+def test_a_crop_is_verified_by_its_content_after_alignment(images, tmp_path):
+    original = photo(1)
+    crop = _crop(original, (160, 120, 640, 480), tmp_path / "crop.jpg")  # 60 % centre
+    candidate = {"sha256_exact": False, "phash_distance": 30, "cosine": 0.93,
+                 "retrieved_by": [EMBEDDING_ALGORITHM]}
+    status, verification = verify_candidate(crop, candidate, images["original"])
+    assert status == VERIFIED_MATCH
+    assert verification["gates"] == {"phash": False, "cosine": True, "geometry": True,
+                                     "aligned": True}
+    assert verification["method"] == "embedding+orb+aligned"
+    [alignment] = [a for a in verification["orb"]["alignments"] if a["method"] == "homography"]
+    assert alignment["coverage"] >= 0.9
+    assert alignment["aligned_phash_distance"] <= 4 and alignment["aligned_ncc"] >= 0.9
+    assert "consistent with a crop" in verification["reasons"][0]
+
+
+def test_a_burst_shot_shares_the_background_but_is_not_verified(tmp_path):
+    # The same static scene with the subject replaced: one homography fits the
+    # background, but the aligned content disagrees where the subject was.
+    scene = photo(21)
+    second = scene.copy()
+    second.paste(photo(22).crop((0, 0, 400, 300)), (200, 150))
+    a, b = tmp_path / "a.png", tmp_path / "b.jpg"
+    scene.save(a)
+    second.save(b, "JPEG", quality=85)
+    candidate = {"sha256_exact": False, "phash_distance": 6, "cosine": 0.95,
+                 "retrieved_by": ["phash", EMBEDDING_ALGORITHM]}
+    status, verification = verify_candidate(b, candidate, a)
+    assert verification["gates"]["geometry"] is True
+    assert verification["gates"]["phash"] is True  # the whole-frame pHash is fooled
+    assert verification["gates"]["aligned"] is False
+    assert status == SIMILAR_UNVERIFIED
+
+
+def test_an_upload_larger_than_the_candidate_is_not_a_crop_of_it(images, tmp_path):
+    # The candidate is the crop here; the upload extends beyond it.
+    small = _crop(photo(1), (160, 120, 640, 480), tmp_path / "small.jpg")
+    candidate = {"sha256_exact": False, "phash_distance": 30, "cosine": 0.93,
+                 "retrieved_by": [EMBEDDING_ALGORITHM]}
+    status, verification = verify_candidate(images["original"], candidate, small)
+    assert status == SIMILAR_UNVERIFIED
+    assert verification["gates"]["aligned"] is False
+    assert any("inside the candidate" in r for r in verification["reasons"])
+
+
+def test_aligned_thresholds_are_read_from_settings(images, monkeypatch):
+    from app.core.config import settings
+
+    monkeypatch.setattr(settings, "similarity_aligned_ncc_min", 1.01)
+    candidate = {"sha256_exact": False, "phash_distance": 2, "cosine": 0.97,
+                 "retrieved_by": ["phash"]}
+    status, verification = verify_candidate(images["copy"], candidate, images["original"])
+    assert status == SIMILAR_UNVERIFIED
+    assert verification["thresholds"]["aligned_ncc_min"] == 1.01
 
 
 def test_every_gate_failing_is_no_match(images):

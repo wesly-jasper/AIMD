@@ -31,13 +31,19 @@ class MetadataExtractor:
         ext = file_path.suffix.lower()
 
         if ext in _IMAGE_EXTS:
-            return self._extract_image_metadata(file_path)
-        if ext in _VIDEO_EXTS:
-            return self._extract_video_metadata(file_path)
-        if ext in _AUDIO_EXTS:
-            return self._extract_audio_metadata(file_path)
+            meta = self._extract_image_metadata(file_path)
+        elif ext in _VIDEO_EXTS:
+            meta = self._extract_video_metadata(file_path)
+        elif ext in _AUDIO_EXTS:
+            meta = self._extract_audio_metadata(file_path)
+        else:
+            raise ValueError(f"Unsupported media format: {ext}")
 
-        raise ValueError(f"Unsupported media format: {ext}")
+        # Content Credentials, on every file: their absence is recorded too.
+        from app.services.provenance.c2pa_verifier import verify_c2pa
+
+        meta["c2pa"] = verify_c2pa(file_path)
+        return meta
 
     # ── Images ────────────────────────────────────────────────────────────────
 

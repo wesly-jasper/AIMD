@@ -326,6 +326,9 @@ class AnalysisRequest(BaseModel):
     """Request to run the full analysis pipeline on an already-uploaded media file."""
 
     media_id: str
+    # Where the user says they found the image. Fetched through the SSRF guard
+    # and checked like any other source; never trusted as a source by itself.
+    source_url: Optional[str] = Field(default=None, max_length=2048)
 
 
 class AnalysisResponse(BaseModel):

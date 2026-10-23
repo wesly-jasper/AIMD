@@ -23,6 +23,7 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from app.db import repository as repo
+from app.services.provenance.timeline import build_timeline
 
 logger = logging.getLogger(__name__)
 
@@ -108,6 +109,9 @@ class EvidenceService:
                 "codec": metadata_record.codec if metadata_record else None,
                 "exif_data": metadata_record.exif_data if metadata_record else {},
             } if metadata_record else {},
+            # The signer's claims, with whether the signature holds and is trusted.
+            "content_credentials": (metadata_record.raw_metadata or {}).get("c2pa")
+            if metadata_record else None,
             "ingested_at": media.created_at.isoformat() if media.created_at else None,
         }
 
@@ -210,10 +214,13 @@ class EvidenceService:
         }
 
         # ── Source Evidence ───────────────────────────────────────────────────
+        searches = analysis.source_searches or {}
         source_evidence = {
             "candidates": [],
             "earliest_known_occurrence": None,
             "provider_status": "UNAVAILABLE",
+            # Per connector: UNAVAILABLE (not searched), FAILED, or COMPLETED.
+            "searches": searches,
             "evidence_category": "INFERENCE",
             "note": (
                 "INFERENCE: 'Earliest-known occurrence' means the earliest timestamp "
@@ -231,11 +238,23 @@ class EvidenceService:
                 "provider": src.provider,
                 "retrieval_status": src.retrieval_status,
                 "is_earliest_known": src.is_earliest_known,
+                "verification_status": src.verification_status,
+                "verification": src.verification,
+                "citation": src.citation,
             }
             source_evidence["candidates"].append(src_dict)
             if src.is_earliest_known:
                 source_evidence["earliest_known_occurrence"] = src_dict
             source_evidence["provider_status"] = src.retrieval_status
+        if any(s.get("status") == "COMPLETED" for s in searches.values()):
+            source_evidence["provider_status"] = "COMPLETED"
+
+        # ── Provenance timeline (rebuilt from the sources above) ──────────────
+        provenance_timeline = build_timeline(
+            sources,
+            metadata_record.exif_data if metadata_record else None,
+            (metadata_record.raw_metadata or {}).get("c2pa") if metadata_record else None,
+        )
 
         # ── Provenance ────────────────────────────────────────────────────────
         provenance_evidence = {
@@ -275,6 +294,7 @@ class EvidenceService:
             "similarity_evidence": similarity_evidence,
             "ai_generation_evidence": ai_generation_evidence,
             "source_evidence": source_evidence,
+            "provenance_timeline": provenance_timeline,
             "provenance_evidence": provenance_evidence,
             "classified_evidence": classified_items,
             "limitations": limitations,
@@ -302,11 +322,24 @@ class EvidenceService:
                 elif note := meta.get("note"):
                     limitations.append(note)
 
-        # Source limitations
-        if not sources:
+        # Source limitations: say what was not searched, and that what was
+        # searched is a bounded index, never "the internet".
+        searches = analysis.source_searches or {}
+        for name, outcome in sorted(searches.items()):
+            if outcome.get("status") != "COMPLETED":
+                limitations.append(
+                    f"UNCERTAINTY: Source '{name}' was not searched "
+                    f"({outcome.get('status')}: {outcome.get('reason')})."
+                )
+        if not any(s.get("status") == "COMPLETED" for s in searches.values()):
             limitations.append(
-                "UNCERTAINTY: No internet source search provider is configured. "
+                "UNCERTAINTY: No source was searched. "
                 "Cannot determine earliest known online occurrence."
+            )
+        elif not any(s.verification_status == "VERIFIED_MATCH" for s in sources):
+            limitations.append(
+                "UNCERTAINTY: No verified source was found in the indexes searched. "
+                "This does not mean the image was never published elsewhere."
             )
 
         # Partial analysis

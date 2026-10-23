@@ -26,6 +26,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
+from urllib.parse import urlsplit
 
 from sqlalchemy.orm import Session
 
@@ -42,8 +43,10 @@ from app.services.preprocessing.metadata_extractor import MetadataExtractor
 from app.services.preprocessing.frame_extractor import FrameExtractor
 from app.services.preprocessing.keyframe_selector import KeyframeSelector
 from app.services.fingerprinting.fingerprint import EMBEDDING_ALGORITHM, FingerprintService
-from app.services.similarity.similarity_engine import SimilarityEngine
+from app.services.similarity.similarity_engine import VERIFIED_MATCH, SimilarityEngine
 from app.services.provenance.source_tracer import SourceTracer
+from app.services.sources import default_source_connectors
+from app.services.sources.connectors import SourceQuery
 from app.services.provenance.graph import build_provenance_graph
 from app.services.evidence.evidence_service import EvidenceService
 from app.services.evidence.report_generator import ReportGenerator
@@ -144,12 +147,14 @@ class AnalysisPipeline:
         self._fingerprint_service = FingerprintService()
         self._similarity_engine = SimilarityEngine()
         self._source_tracer = SourceTracer()
+        self._source_connectors = default_source_connectors()
         self._evidence_service = EvidenceService()
         self._report_generator = ReportGenerator()
         self._detection_container = DetectionContainer()
 
     def run(
-        self, media_id: str, db: Session, requested_by: Optional[str] = None
+        self, media_id: str, db: Session, requested_by: Optional[str] = None,
+        source_url: Optional[str] = None,
     ) -> dict[str, Any]:
         """
         Run the complete pipeline for the given media_id.
@@ -213,7 +218,9 @@ class AnalysisPipeline:
 
             # ── Stage 6: Source tracing ───────────────────────────────────────
             logger.info("[%s] Stage 6: Source tracing", analysis_id)
-            self._run_source_tracing(file_path, analysis_id, db, stage_failures)
+            self._run_source_tracing(
+                file_path, media_id, analysis_id, db, stage_failures, source_url=source_url
+            )
 
             # ── Stage 7: Provenance ───────────────────────────────────────────
             logger.info("[%s] Stage 7: Provenance", analysis_id)
@@ -541,18 +548,54 @@ class AnalysisPipeline:
     def _run_source_tracing(
         self,
         file_path: Path,
+        media_id: str,
         analysis_id: str,
         db: Session,
         failures: list,
+        source_url: Optional[str] = None,
     ) -> None:
-        try:
-            trace_result = self._source_tracer.trace_source(str(file_path))
-            candidates = trace_result.get("candidates", [])
-            if not candidates:
-                return
+        """
+        Search every source connector, then any external search provider.
 
-            sources_to_save = []
-            for i, c in enumerate(candidates):
+        Only a VERIFIED_MATCH with a publication time can be the earliest known
+        occurrence. An unverified lead, or a provider result nobody checked, is
+        stored as a source but never given that label.
+        """
+        sources_to_save: list[dict] = []
+        try:
+            fingerprints = repo.get_fingerprints_for_media(db, media_id)
+            query = SourceQuery(
+                file_path=str(file_path),
+                fingerprints={fp.algorithm: fp.value for fp in fingerprints},
+                embedding_version=next(
+                    (fp.algorithm_version for fp in fingerprints
+                     if fp.algorithm == EMBEDDING_ALGORITHM), None
+                ),
+                claimed_url=source_url,
+            )
+            searches = {}
+            for connector in self._source_connectors:
+                result = connector.run(query, db)
+                searches[connector.name] = result.summary()
+                query.prior_hits.extend(result.hits)
+                for hit in result.hits:
+                    sources_to_save.append({
+                        "analysis_id": analysis_id,
+                        "url": hit.url,
+                        "title": hit.title,
+                        "domain": urlsplit(hit.url).netloc or None,
+                        "source_timestamp": hit.published_at,
+                        "similarity": hit.similarity,
+                        "provider": hit.provider,
+                        "retrieval_status": "FOUND",
+                        "is_earliest_known": False,
+                        "verification_status": hit.verification_status,
+                        "verification": hit.verification,
+                        "citation": hit.citation,
+                    })
+            repo.update_analysis_run(db, analysis_id, source_searches=searches)
+
+            for c in self._source_tracer.trace_source(str(file_path)).get("candidates", []):
                 sources_to_save.append({
                     "analysis_id": analysis_id,
                     "url": c.get("url"),
@@ -561,8 +604,13 @@ class AnalysisPipeline:
                     "similarity": c.get("similarity"),
                     "provider": c.get("provider", "unknown"),
                     "retrieval_status": "FOUND",
-                    "is_earliest_known": i == 0,  # First is earliest known
+                    "is_earliest_known": False,
                 })
+
+            dated = [s for s in sources_to_save
+                     if s.get("verification_status") == VERIFIED_MATCH and s.get("source_timestamp")]
+            if dated:
+                min(dated, key=lambda s: s["source_timestamp"])["is_earliest_known"] = True
             if sources_to_save:
                 repo.bulk_create_sources(db, sources_to_save)
         except Exception as exc:
@@ -600,12 +648,18 @@ class AnalysisPipeline:
                     "node_type": "source",
                     "node_metadata": {"url": src.url, "domain": src.domain},
                 })
+                # A high similarity alone used to make a source "reposted_from";
+                # only verification says the source holds the same image.
+                verified = src.verification_status == VERIFIED_MATCH
                 edges.append({
                     "source_node_id": src_node_id,
                     "target_node_id": media_id,
-                    "relationship": "reposted_from" if src.similarity and src.similarity > 0.95 else "visually_similar_to",
+                    "relationship": "same_image_as" if verified else "visually_similar_to",
                     "confidence": src.similarity or 0.5,
-                    "evidence": f"Similarity: {src.similarity}, Provider: {src.provider}",
+                    "evidence": (
+                        f"Similarity: {src.similarity}, Provider: {src.provider}, "
+                        f"Verification: {src.verification_status or 'NOT_VERIFIED'}"
+                    ),
                 })
 
             for match in similarity_matches:

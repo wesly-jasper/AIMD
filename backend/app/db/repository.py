@@ -15,7 +15,7 @@ from app.db.models import (
     ProvenanceNodeRecord, ProvenanceEdgeRecord,
     EvidenceItemRecord, ReportRecord,
     CaseRecord, ObservationRecord, FindingRecord, FindingObservationRecord,
-    AssessmentRecord,
+    AssessmentRecord, ReferenceImageRecord, ReferenceFingerprintRecord,
 )
 
 #: The only two bearings an observation may have on a finding.
@@ -288,7 +288,7 @@ def update_analysis_run(db: Session, analysis_id: str, **fields) -> Optional[Ana
     """Set run-provenance fields (software/detector versions, config, duration)."""
     allowed = {
         "requested_by", "software_version", "detector_set_version",
-        "config_snapshot", "duration_ms",
+        "config_snapshot", "duration_ms", "source_searches",
     }
     unknown = set(fields) - allowed
     if unknown:
@@ -426,6 +426,60 @@ def get_all_fingerprints(db: Session, algorithm: str, owner: str) -> List[Finger
 
 def get_fingerprints_for_media(db: Session, media_id: str) -> List[FingerprintRecord]:
     return db.query(FingerprintRecord).filter_by(media_id=media_id).all()
+
+
+# ── Reference corpus ──────────────────────────────────────────────────────────
+
+def get_reference_image(db: Session, corpus: str, external_id: str) -> Optional[ReferenceImageRecord]:
+    return db.query(ReferenceImageRecord).filter_by(corpus=corpus, external_id=external_id).first()
+
+
+def get_reference_image_by_id(db: Session, reference_id: str) -> Optional[ReferenceImageRecord]:
+    return db.get(ReferenceImageRecord, reference_id)
+
+
+def upsert_reference_image(db: Session, data: dict) -> ReferenceImageRecord:
+    """Create the image, or overwrite the stored fields of the same (corpus, external_id)."""
+    record = get_reference_image(db, data["corpus"], data["external_id"])
+    if record is None:
+        record = ReferenceImageRecord(**data)
+        db.add(record)
+    else:
+        for key, value in data.items():
+            setattr(record, key, value)
+    db.commit()
+    db.refresh(record)
+    return record
+
+
+def delete_reference_fingerprints(
+    db: Session, reference_id: str, algorithms: Optional[List[str]] = None
+) -> None:
+    query = db.query(ReferenceFingerprintRecord).filter_by(reference_id=reference_id)
+    if algorithms is not None:
+        query = query.filter(ReferenceFingerprintRecord.algorithm.in_(algorithms))
+    query.delete(synchronize_session=False)
+    db.commit()
+
+
+def bulk_create_reference_fingerprints(db: Session, fingerprints: List[dict]) -> None:
+    db.add_all([ReferenceFingerprintRecord(**f) for f in fingerprints])
+    db.commit()
+
+
+def get_reference_fingerprints(
+    db: Session, algorithm: str, corpus: Optional[str] = None
+) -> List[ReferenceFingerprintRecord]:
+    query = db.query(ReferenceFingerprintRecord).filter(
+        ReferenceFingerprintRecord.algorithm == algorithm
+    )
+    if corpus is not None:
+        query = query.join(ReferenceImageRecord).filter(ReferenceImageRecord.corpus == corpus)
+    return query.all()
+
+
+def count_reference_images(db: Session, corpus: str) -> int:
+    return db.query(ReferenceImageRecord).filter_by(corpus=corpus).count()
 
 
 # ── Similarity Matches ────────────────────────────────────────────────────────

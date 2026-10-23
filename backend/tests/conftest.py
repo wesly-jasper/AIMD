@@ -50,6 +50,7 @@ os.environ["LOGS_DIR"] = str(_TEST_ROOT / "logs")
 # a real credential from the developer's environment or .env file.
 os.environ["GOOGLE_VISION_API_KEY"] = ""
 os.environ["TINEYE_API_KEY"] = ""
+os.environ["SOURCE_WAYBACK_ENABLED"] = "false"
 
 for _sub in ("uploads", "processed", "processed/frames", "processed/keyframes",
              "reports", "logs"):

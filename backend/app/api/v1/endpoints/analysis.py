@@ -15,6 +15,7 @@ from app.core.auth import User, get_current_user
 from app.core.rate_limit import ANALYSIS_LIMIT, limiter
 from app.db.database import get_db
 from app.db import repository as repo
+from app.services.provenance.timeline import build_timeline
 from app.schemas.detection import AnalysisRequest, AnalysisResponse
 from app.services.audit.audit_log import AuditAction, record_event
 from app.services.orchestration.analysis_pipeline import AnalysisPipeline
@@ -60,14 +61,15 @@ def run_analysis(
         action=AuditAction.ANALYSIS_STARTED,
         case_id=media.case_id,
         media_id=media.id,
-        details={"sha256": media.sha256},
+        details={"sha256": media.sha256, "source_url": body.source_url},
     )
 
     # Neither exception's text is returned: both can carry the absolute storage
     # path of the evidence file.
     try:
         result = _pipeline.run(
-            media_id=body.media_id, db=db, requested_by=current_user.username
+            media_id=body.media_id, db=db, requested_by=current_user.username,
+            source_url=body.source_url,
         )
     except FileNotFoundError:
         logger.exception("Evidence bytes missing for media %s", body.media_id)
@@ -118,6 +120,11 @@ def get_analysis(
 
     media = repo.get_media(db, analysis.media_id)
     media_type = media.media_type if media else (detections[0].media_type if detections else "image")
+    sources = repo.get_sources_for_analysis(db, analysis_id)
+    exif = media.metadata_record.exif_data if media and media.metadata_record else None
+    raw = (media.metadata_record.raw_metadata or {}) if media and media.metadata_record else {}
+    # NULL for media analysed before Content Credentials were checked.
+    c2pa = raw.get("c2pa")
 
     # Find suspicious segments from video detections
     suspicious_segments = []
@@ -174,6 +181,28 @@ def get_analysis(
             }
             for m in repo.get_similarity_matches_for_analysis(db, analysis_id)
         ],
+        # Which source connectors ran: an empty ``sources`` list means "not
+        # found in what was searched" only where the connector COMPLETED.
+        "source_searches": analysis.source_searches,
+        "sources": [
+            {
+                "id": s.id,
+                "url": s.url,
+                "title": s.title,
+                "domain": s.domain,
+                "provider": s.provider,
+                "published_at": s.source_timestamp.isoformat() if s.source_timestamp else None,
+                "similarity": s.similarity,
+                "is_earliest_known": s.is_earliest_known,
+                "verification_status": s.verification_status,
+                "verification": s.verification,
+                "citation": s.citation,
+            }
+            for s in sources
+        ],
+        # Rebuilt from the stored sources and metadata on every read.
+        "provenance_timeline": build_timeline(sources, exif, c2pa),
+        "content_credentials": c2pa,
         "observations": [
             {
                 "id": o.id,

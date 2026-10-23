@@ -169,6 +169,9 @@ class AnalysisRecord(Base):
     # AnalysisPipeline._config_snapshot for the allow-list.
     config_snapshot: Mapped[Optional[dict]] = mapped_column(JSON)
     duration_ms: Mapped[Optional[int]] = mapped_column(Integer)
+    # {connector: {status, reason, hits, verified, duration_ms}}: which sources
+    # were searched, so "no source found" is never confused with "not searched".
+    source_searches: Mapped[Optional[dict]] = mapped_column(JSON)
 
     # Relationships
     media: Mapped["MediaRecord"] = sa_relationship(back_populates="analyses")
@@ -371,9 +374,80 @@ class SourceRecord(Base):
     provider: Mapped[str] = mapped_column(String, nullable=False)  # search provider name
     retrieval_status: Mapped[str] = mapped_column(String, default="FOUND")
     is_earliest_known: Mapped[bool] = mapped_column(Boolean, default=False)
+    # VERIFIED_MATCH | SIMILAR_UNVERIFIED, and the measurements behind it. NULL
+    # for sources recorded before verification existed (never verified).
+    verification_status: Mapped[Optional[str]] = mapped_column(String)
+    verification: Mapped[Optional[dict]] = mapped_column(JSON)
+    # What the source itself states (uploader, licence, file URL, ...), cited.
+    citation: Mapped[Optional[dict]] = mapped_column(JSON)
     discovered_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
     analysis: Mapped["AnalysisRecord"] = sa_relationship(back_populates="sources")
+
+
+# ── Reference corpus ──────────────────────────────────────────────────────────
+#
+# Public images indexed so an upload can be traced to where it was published.
+# Not anyone's media: no owner, never returned by the owner-scoped media search,
+# and every row carries the citation (page URL, uploader, upload time, licence)
+# that a source claim must rest on.
+
+class ReferenceImageRecord(Base):
+    __tablename__ = "reference_images"
+    __table_args__ = (
+        UniqueConstraint("corpus", "external_id", name="uq_reference_images_corpus_external_id"),
+    )
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=_uuid)
+    corpus: Mapped[str] = mapped_column(String, nullable=False)  # e.g. wikimedia_commons
+    # The corpus's own identifier, e.g. the Commons title "File:Example.jpg".
+    external_id: Mapped[str] = mapped_column(String, nullable=False)
+    page_url: Mapped[str] = mapped_column(String, nullable=False)
+    file_url: Mapped[str] = mapped_column(String, nullable=False)
+    # What was actually downloaded and fingerprinted; may be a scaled rendition.
+    download_url: Mapped[str] = mapped_column(String, nullable=False)
+    uploader: Mapped[Optional[str]] = mapped_column(String)
+    # When the current version of the file -- the pixels indexed here -- was
+    # uploaded. Not when the photograph was taken, and not its first appearance.
+    uploaded_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    licence: Mapped[Optional[str]] = mapped_column(String)
+    licence_url: Mapped[Optional[str]] = mapped_column(String)
+    artist: Mapped[Optional[str]] = mapped_column(Text)
+    # The corpus's hash of the original file, to notice when it is replaced.
+    original_sha1: Mapped[Optional[str]] = mapped_column(String(40))
+    original_width: Mapped[Optional[int]] = mapped_column(Integer)
+    original_height: Mapped[Optional[int]] = mapped_column(Integer)
+    original_mime: Mapped[Optional[str]] = mapped_column(String)
+    file_path: Mapped[str] = mapped_column(String, nullable=False)
+    sha256: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    size_bytes: Mapped[int] = mapped_column(Integer, nullable=False)
+    width: Mapped[Optional[int]] = mapped_column(Integer)
+    height: Mapped[Optional[int]] = mapped_column(Integer)
+    categories: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    # Descriptive metadata as the corpus states it (DateTimeOriginal, credit, ...):
+    # claims by the uploader, not facts established here.
+    source_metadata: Mapped[Optional[dict]] = mapped_column(JSON)
+    retrieved_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+    fingerprints: Mapped[list["ReferenceFingerprintRecord"]] = sa_relationship(
+        back_populates="reference", cascade="all, delete-orphan"
+    )
+
+
+class ReferenceFingerprintRecord(Base):
+    """A fingerprint of a reference image, in the same form as ``fingerprints``."""
+    __tablename__ = "reference_fingerprints"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=_uuid)
+    reference_id: Mapped[str] = mapped_column(
+        String, ForeignKey("reference_images.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    algorithm: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    algorithm_version: Mapped[Optional[str]] = mapped_column(String)
+    value: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+    reference: Mapped["ReferenceImageRecord"] = sa_relationship(back_populates="fingerprints")
 
 
 # ── Provenance ────────────────────────────────────────────────────────────────

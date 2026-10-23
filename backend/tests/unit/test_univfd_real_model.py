@@ -120,7 +120,7 @@ def test_done_when_on_real_photographs(tmp_path, backbone, same_class_pair):
 
     status = {m["source_media_id"]: m["verification_status"]
               for m in result["local_matches"]}
-    assert status.get(ids[original]) == VERIFIED_MATCH, result["local_matches"]
+    assert status.get(ids[original]) == VERIFIED_MATCH, [(m["verification"]["reasons"], m["verification"].get("orb")) for m in result["local_matches"]]
     assert status.get(ids[other]) != VERIFIED_MATCH, (
         "a different photograph of the same class was verified as a copy"
     )

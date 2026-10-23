@@ -31,6 +31,11 @@ _AUDIO_EXTS = {".wav", ".mp3", ".aac", ".m4a", ".flac"}
 EMBEDDING_ALGORITHM = "clip-vit-l14"
 
 
+def embedding_version(embedder: Any) -> str:
+    """The ``algorithm_version`` an embedding from ``embedder`` is stored under."""
+    return f"{embedder.version_tag}/retrieval224/l2"
+
+
 def encode_embedding(vector: np.ndarray) -> str:
     """A unit-length float vector as base64 of its little-endian fp16 bytes."""
     return base64.b64encode(np.asarray(vector, dtype="<f2").tobytes()).decode("ascii")
@@ -66,15 +71,16 @@ def _default_embedder() -> Any | None:
 
 class FingerprintService:
 
-    def __init__(self, embedder: Any | None = None):
+    def __init__(self, embedder: Any | None = None, default_embedder: bool = True):
         """
         ``embedder`` maps an image path to a unit-length vector and has a
         ``version_tag``. ``None`` means the shared CLIP backbone, resolved lazily
-        and only when ``SIMILARITY_EMBEDDING_ENABLED`` is set.
+        and only when ``SIMILARITY_EMBEDDING_ENABLED`` is set -- or no embedding
+        at all with ``default_embedder=False``.
         """
         self.hash_generator = HashGenerator()
         self._embedder = embedder
-        self._embedder_resolved = embedder is not None
+        self._embedder_resolved = embedder is not None or not default_embedder
 
     def _get_embedder(self) -> Any | None:
         if not self._embedder_resolved:
@@ -168,7 +174,7 @@ class FingerprintService:
             if embedder is not None:
                 try:
                     vector = embedder.embed(file_path)
-                    version = f"{embedder.version_tag}/retrieval224/l2"
+                    version = embedding_version(embedder)
                     results[EMBEDDING_ALGORITHM + "_version"] = version
                     fingerprint_records.append({
                         "media_id": media_id,

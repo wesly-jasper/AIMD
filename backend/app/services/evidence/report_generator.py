@@ -195,7 +195,7 @@ class ReportGenerator:
         if loc_matches:
             lines.append(
                 f"- **Verified Matches:** `{similarity.get('verified_matches', 0)}` "
-                "(perceptual hash, embedding and geometric checks all passed)"
+                "(embedding, geometric and aligned-content checks all passed)"
             )
             for m in loc_matches[:5]:
                 status = m.get("verification_status") or "NOT_VERIFIED"
@@ -216,13 +216,44 @@ class ReportGenerator:
                 "### Earliest-Known Discovered Occurrence",
                 f"- **URL / Source:** `{earliest.get('url', 'N/A')}`",
                 f"- **Discovered Timestamp:** `{earliest.get('source_timestamp', 'Unknown')}`",
-                f"- **Match Similarity:** `{earliest.get('similarity', 0):.2%}`",
+                f"- **Match Similarity:** `{earliest.get('similarity') or 0:.2%}`",
+                f"- **Verification:** `{earliest.get('verification_status') or 'NOT_VERIFIED'}`",
                 f"- **Provider:** `{earliest.get('provider', 'N/A')}`",
                 "> *Note:* This represents the earliest occurrence discovered by AIMD, not absolute cryptographic provenance.",
                 "",
             ])
         else:
             lines.append(f"- **Internet Search Status:** `{source.get('provider_status', 'UNAVAILABLE')}` (No external origin discovered)\n")
+
+        credentials = (evidence_package.get("media_evidence") or {}).get("content_credentials")
+        if credentials:
+            lines.extend(["### Content Credentials (C2PA)", "",
+                          f"- **Status:** `{credentials.get('status')}`"])
+            signer = credentials.get("signer") or {}
+            if signer.get("common_name"):
+                trust = "trusted" if credentials.get("trusted_signer") else "NOT on a trust list"
+                lines.append(f"- **Signer:** `{signer['common_name']}` ({trust})")
+            if credentials.get("digital_source_types"):
+                lines.append(f"- **Declared source type:** `{', '.join(credentials['digital_source_types'])}`")
+            if credentials.get("ai_generation_declared"):
+                lines.append("- **The signer declares this content AI-generated.** "
+                             "This is their statement, not an AIMD detection.")
+            for failure in credentials.get("failures") or []:
+                lines.append(f"- Validation: `{failure.get('code')}` -- {failure.get('explanation')}")
+            lines.append("")
+
+        timeline = evidence_package.get("provenance_timeline") or {}
+        if timeline.get("events"):
+            lines.extend(["### Provenance Timeline [INFERENCE]", ""])
+            for event in timeline["events"]:
+                cite = event.get("citation") or {}
+                where = cite.get("url") or cite.get("field") or cite.get("provider")
+                label = " **(earliest known appearance)**" if event.get("earliest_known_appearance") else ""
+                when = event.get("timestamp") or event.get("stated_value") or "undated"
+                lines.append(
+                    f"- `{when}` **{event['type']}**{label}: {event['description']} -- source: `{where}`"
+                )
+            lines.extend(["", f"> *Note:* {timeline.get('note', '')}", ""])
 
         lines.extend([
             "---",
