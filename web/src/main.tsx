@@ -9,6 +9,7 @@ import { Home } from "./pages/Home";
 import { Result } from "./pages/Result";
 import "./styles/app.css";
 import "./styles/product.css";
+import "./styles/panels.css";
 
 function Routed() {
   const { user, checking } = useAuth();

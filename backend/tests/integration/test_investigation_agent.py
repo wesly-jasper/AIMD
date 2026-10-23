@@ -149,6 +149,8 @@ def test_recorded_investigation_calls_tools_and_every_citation_resolves(agent_sl
     assert len(set(names)) >= 2
     assert [c["id"] for c in result["tool_calls"]] == ["T1", "T2", "T3"]
     assert [c["category"] for c in result["tool_calls"]] == ["OBSERVATION", "OBSERVATION", "FACT"]
+    # The plan as executed: the model asked for the first two together.
+    assert [c["step"] for c in result["tool_calls"]] == [1, 1, 2]
     assert all("result" in c and "error" not in c for c in result["tool_calls"])
 
     # Every citation resolves to a tool call in the trace.

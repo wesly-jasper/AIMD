@@ -1,9 +1,12 @@
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { deleteMedia, postJson } from "../api";
 import { AvailabilityMark, DeleteControl, ErrorBlock, ExecutionPill, Hash, Skeleton, TitleRow } from "../components/bits";
 import { WhatWeChecked } from "../components/Coverage";
 import { EvidenceView, regionsOf } from "../components/Evidence";
+import { InvestigationCard } from "../components/Investigation";
+import { BranchCards, HeatmapCard, ProvenanceCard, SourcesCard, VideoTimeline } from "../components/Panels";
+import { ReportCard } from "../components/Report";
 import { Shell } from "../components/Shell";
 import { POLARITY, SEMANTICS, count, dateTime, duration, familyLabel, score } from "../format";
 import { useResource } from "../hooks";
@@ -61,6 +64,7 @@ export function Result() {
   const [point, setPoint] = useState<string | null>(null);
   const [rerunning, setRerunning] = useState(false);
   const [rerunError, setRerunError] = useState<string | null>(null);
+  const videoRef = useRef<HTMLVideoElement>(null);
 
   const d = a.data;
   const byId = useMemo(() => new Map((d?.observations ?? []).map((o) => [o.id, o])), [d]);
@@ -120,7 +124,7 @@ export function Result() {
         <section className="card span-7 media-card" aria-label="The file">
           {d ? (
             <EvidenceView mediaId={d.media_id} mediaType={d.media_type} regions={regions}
-              highlight={point ? new Set([point]) : null} alt={`The checked file: ${name}`} />
+              highlight={point ? new Set([point]) : null} alt={`The checked file: ${name}`} videoRef={videoRef} />
           ) : <div className="evidence-frame loading" />}
           {d && (
             <p className="media-caption">
@@ -144,6 +148,26 @@ export function Result() {
           )}
         </section>
       </div>
+
+      {d && (
+        <>
+          <BranchCards d={d} />
+          {d.media_type === "image" ? (
+            <div className="grid">
+              <HeatmapCard analysisId={d.analysis_id} mediaId={d.media_id} detections={d.detections} />
+              <div className="span-5"><ProvenanceCard d={d} /></div>
+            </div>
+          ) : (
+            <>
+              {d.media_type === "video" && <VideoTimeline detections={d.detections} videoRef={videoRef} />}
+              <ProvenanceCard d={d} />
+            </>
+          )}
+          <SourcesCard d={d} />
+          <InvestigationCard analysisId={d.analysis_id} finished={d.status !== "QUEUED" && d.status !== "PROCESSING"} />
+          <ReportCard analysisId={d.analysis_id} />
+        </>
+      )}
 
       {d && (
         <details className="card technical">

@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, type RefObject } from "react";
 import { useBlobUrl } from "../hooks";
 import type { Detection, MediaType } from "../types";
 
@@ -18,13 +18,15 @@ export interface DrawnRegion {
  * drawn; it is still counted in the caption.
  */
 export function EvidenceView({
-  mediaId, mediaType, regions, highlight, alt,
+  mediaId, mediaType, regions, highlight, alt, videoRef,
 }: {
   mediaId: string;
   mediaType: MediaType;
   regions: DrawnRegion[];
   highlight: Set<string> | null;
   alt: string;
+  /** Lets the keyframe timeline seek the player. */
+  videoRef?: RefObject<HTMLVideoElement | null>;
 }) {
   const { url, error } = useBlobUrl(`/media/${mediaId}/download`);
   const [size, setSize] = useState<{ w: number; h: number } | null>(null);
@@ -33,7 +35,7 @@ export function EvidenceView({
   if (!url) return <div className="evidence-frame loading" aria-busy="true" />;
 
   if (mediaType === "video") {
-    return <video className="evidence-media" src={url} controls muted preload="metadata" />;
+    return <video ref={videoRef} className="evidence-media" src={url} controls muted preload="metadata" />;
   }
   if (mediaType === "audio") {
     return <audio className="evidence-audio" src={url} controls preload="metadata" />;

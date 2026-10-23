@@ -6,12 +6,17 @@ GET  /api/v1/analysis/{analysis_id}  -- Retrieve analysis status and results.
 GET  /api/v1/analysis/  -- List analyses.
 POST /api/v1/analysis/{analysis_id}/investigate  -- Start a Nemotron investigation.
 GET  /api/v1/analysis/{analysis_id}/investigation  -- The latest investigation.
+GET  /api/v1/analysis/{analysis_id}/detections/{detection_id}/artefacts/{kind}  -- A heatmap.
+GET  /api/v1/analysis/{analysis_id}/report?format=json|md|html  -- The stored report.
 """
+import hashlib
 import logging
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Optional
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request, Response
+from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 from sqlalchemy.orm import Session
 
 from app.core.auth import User, get_current_user
@@ -24,6 +29,7 @@ from app.services.agent.nemotron_agent import NemotronAgent
 from app.services.provenance.timeline import build_timeline
 from app.schemas.detection import AnalysisRequest, AnalysisResponse, InvestigationRequest
 from app.services.audit.audit_log import AuditAction, record_event
+from app.services.evidence.report_html import render_report_html
 from app.services.orchestration.analysis_pipeline import AnalysisPipeline
 
 logger = logging.getLogger(__name__)
@@ -399,3 +405,88 @@ def get_investigation(
     if record is None:
         raise HTTPException(status_code=404, detail="No investigation for this analysis")
     return nemotron_agent.serialise_investigation(record)
+
+
+@router.get(
+    "/{analysis_id}/detections/{detection_id}/artefacts/{kind}",
+    summary="A detector's evidence artefact, e.g. a TruFor heatmap",
+)
+def get_artefact(
+    analysis_id: str,
+    detection_id: str,
+    kind: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Only a path a detector recorded for this detection is served, and only from
+    below ``settings.artefacts_dir``. The bytes are checked against the SHA-256
+    recorded at analysis time, so a replaced file is refused rather than shown.
+    """
+    if not repo.get_owned_analysis(db, analysis_id, current_user.username):
+        raise HTTPException(status_code=404, detail="Analysis not found")
+    detection = next(
+        (d for d in repo.get_detections_for_analysis(db, analysis_id) if d.id == detection_id),
+        None,
+    )
+    artefacts = ((detection.detector_metadata or {}).get("artefacts") or {}) if detection else {}
+    artefact = artefacts.get(kind)
+    if not isinstance(artefact, dict) or not isinstance(artefact.get("path"), str):
+        raise HTTPException(status_code=404, detail="No such artefact")
+
+    root = Path(settings.artefacts_dir).resolve()
+    path = (root / artefact["path"]).resolve()
+    if not path.is_relative_to(root) or not path.is_file():
+        raise HTTPException(status_code=404, detail="Artefact missing from storage")
+    data = path.read_bytes()
+    digest = hashlib.sha256(data).hexdigest()
+    if artefact.get("sha256") and digest != artefact["sha256"]:
+        raise HTTPException(
+            status_code=409,
+            detail="Artefact bytes no longer match the hash recorded at analysis",
+        )
+    return Response(
+        content=data,
+        media_type=artefact.get("media_type") or "application/octet-stream",
+        headers={"X-Content-SHA256": digest, "Cache-Control": "private, max-age=3600"},
+    )
+
+
+@router.get("/{analysis_id}/report", summary="The stored report as JSON, Markdown or HTML")
+def get_report(
+    analysis_id: str,
+    format: str = Query("json", pattern="^(json|md|html)$"),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    The report written when the analysis finished. HTML is rendered from the
+    stored Markdown with everything escaped; its print stylesheet makes it the
+    PDF form ("Save as PDF").
+    """
+    analysis = repo.get_owned_analysis(db, analysis_id, current_user.username)
+    if not analysis:
+        raise HTTPException(status_code=404, detail="Analysis not found")
+    report = repo.get_report_for_analysis(db, analysis_id)
+    if report is None:
+        raise HTTPException(status_code=404, detail="No report has been written for this analysis")
+
+    filename = f"aimd-report-{analysis_id}.{format}"
+    disposition = {"Content-Disposition": f'inline; filename="{filename}"'}
+    if format == "json":
+        if report.json_report is None:
+            raise HTTPException(status_code=404, detail="This report has no JSON form")
+        return JSONResponse(report.json_report, headers=disposition)
+    if report.markdown_report is None:
+        raise HTTPException(status_code=404, detail="This report has no Markdown form")
+    if format == "md":
+        return PlainTextResponse(report.markdown_report, media_type="text/markdown; charset=utf-8",
+                                 headers=disposition)
+    return HTMLResponse(
+        render_report_html(report.markdown_report, f"AIMD report {analysis_id}"),
+        headers={
+            **disposition,
+            # The document is static: no script, no fetch, nothing but its own styles.
+            "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'",
+        },
+    )

@@ -258,7 +258,8 @@ class NemotronAgent:
                              "category": None, "error": "tool call budget for this investigation is spent"}
                 else:
                     entry = agent_tools.execute(ctx, tc.function.name, tc.function.arguments)
-                entry = {"id": cid, "provider_call_id": tc.id, **entry,
+                # ``step`` groups the calls the model chose together: the plan, as executed.
+                entry = {"id": cid, "provider_call_id": tc.id, "step": step, **entry,
                          "latency_ms": int((self._clock() - t1) * 1000)}
                 outcome.tool_calls.append(entry)
                 payload = {"tool_call_id": cid, "tool": entry["name"], "category": entry["category"]}
