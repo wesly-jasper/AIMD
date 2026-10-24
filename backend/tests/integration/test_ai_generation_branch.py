@@ -10,6 +10,7 @@ Guards:
 """
 import io
 import uuid
+from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
@@ -134,6 +135,16 @@ def test_no_ai_generation_detector_is_unavailable(db):
     branch = _verdict(db).ai_generation
     assert branch["status"] == "UNAVAILABLE"
     assert branch["detector"] is None
+
+
+def test_a_video_says_the_check_is_image_only_not_unconfigured():
+    """Regression: a video was told no AI-generation detector is configured."""
+    video = [SimpleNamespace(detector="VideoTemporalAnalysisEngine", media_type="video")]
+    branch = AnalysisPipeline._decide_ai_generation(video)
+    assert branch["status"] == "UNAVAILABLE"
+    assert branch["reason"] == "image_only"
+    assert "not configured" not in branch["rationale"]
+    assert "still images" in branch["rationale"]
 
 
 # ── Coverage ─────────────────────────────────────────────────────────────────

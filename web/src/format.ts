@@ -40,7 +40,7 @@ export function count(n: number, one: string, many = one + "s"): string {
 
 export const AVAILABILITY: Record<Availability, string> = {
   AVAILABLE: "Available",
-  UNAVAILABLE: "Not installed",
+  UNAVAILABLE: "Not set up",
 };
 
 export const EXECUTION: Record<Execution, string> = {

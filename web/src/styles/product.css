@@ -166,6 +166,8 @@ a.name:hover { text-decoration: underline; text-underline-offset: 3px; }
 .seg.found, .swatch.found { background: var(--hue); }
 .seg.nothing, .swatch.nothing { background: #e6e6e6; }
 .seg.undecided, .swatch.undecided { background: #6b6b6b; }
+/* Context only (object recognition): ran, but weighs on nothing. */
+.seg.context, .swatch.context { background: transparent; box-shadow: inset 0 0 0 1.5px #6b6b6b; }
 /* Not available: hatched, so an absent check never reads as "found nothing". */
 .seg.unavailable, .swatch.unavailable {
   background-color: #111111;

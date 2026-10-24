@@ -135,3 +135,20 @@ def test_yolo_inference_crash_is_failed_not_unavailable(tmp_path):
     assert result.execution_status == DetectorExecutionStatus.FAILED
     assert "RuntimeError" in result.status_reason
     assert result.produced_observations is False
+
+
+def test_missing_weights_are_unavailable_and_never_downloaded(monkeypatch, tmp_path):
+    """A bare 'yolov8n.pt' would make Ultralytics fetch weights from the internet."""
+    import ultralytics
+
+    def no_network(*_a, **_k):
+        raise AssertionError("YOLO must not be constructed without a local weights file")
+
+    monkeypatch.setattr(ultralytics, "YOLO", no_network)
+    detector = YOLOv8ObjectDetector(model_name=str(tmp_path / "yolov8n.pt"))
+
+    availability, reason = detector.availability()
+
+    assert availability == DetectorAvailability.UNAVAILABLE
+    assert "weights file not found" in reason
+    assert str(tmp_path) not in reason  # no host path in a stored reason

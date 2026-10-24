@@ -4,6 +4,7 @@ import { deleteMedia, postJson } from "../api";
 import { AvailabilityMark, DeleteControl, ErrorBlock, ExecutionPill, Hash, Skeleton, TitleRow } from "../components/bits";
 import { WhatWeChecked } from "../components/Coverage";
 import { EvidenceView, regionsOf } from "../components/Evidence";
+import { ContentCredentialsCard } from "../components/Credentials";
 import { InvestigationCard } from "../components/Investigation";
 import { BranchCards, HeatmapCard, ProvenanceCard, SourcesCard, VideoTimeline } from "../components/Panels";
 import { ReportCard } from "../components/Report";
@@ -191,6 +192,7 @@ export function Result() {
               <ProvenanceCard d={d} />
             </>
           )}
+          <ContentCredentialsCard d={d} />
           <SourcesCard d={d} />
           <InvestigationCard analysisId={d.analysis_id} finished />
           <ReportCard analysisId={d.analysis_id} />

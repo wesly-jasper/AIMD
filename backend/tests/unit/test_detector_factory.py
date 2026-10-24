@@ -11,3 +11,20 @@ def test_trufor_disabled(monkeypatch):
     result=DetectorFactory.create_trufor()
 
     assert result is None
+
+
+def test_object_detection_uses_the_configured_yolov8_weights(monkeypatch, tmp_path):
+    weights = tmp_path / "yolo.pt"
+    weights.write_bytes(b"")
+    monkeypatch.setattr(settings, "object_detection_enabled", True)
+    monkeypatch.setattr(settings, "object_detection_model_path", weights)
+
+    detector = DetectorFactory.create_object_detector()
+
+    assert type(detector).__name__ == "YOLOv8ObjectDetector"
+    assert detector.model_name == str(weights)
+
+
+def test_object_detection_disabled_is_the_unconfigured_placeholder(monkeypatch):
+    monkeypatch.setattr(settings, "object_detection_enabled", False)
+    assert type(DetectorFactory.create_object_detector()).__name__ == "BaselineObjectDetector"

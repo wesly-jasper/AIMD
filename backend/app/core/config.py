@@ -82,6 +82,16 @@ class Settings(BaseSettings):
     univfd_model_path: Optional[Path] = None
     # Applied to sigmoid(logit), an uncalibrated model score; 0.5 is the paper's.
     univfd_threshold: float = 0.5
+    # Root certificates a Content Credentials signer must chain to for TRUSTED:
+    # the official C2PA Trust List, installed by scripts/fetch_c2pa_trust_list.py.
+    # Without it, intact manifests can only be VALID (signer not checked).
+    c2pa_trust_anchors_path: Optional[Path] = BASE_DIR / "models" / "c2pa" / "C2PA-TRUST-LIST.pem"
+    # YOLOv8 object recognition: context for the examiner (what is in the
+    # picture), never evidence of editing. Ultralytics and its weights are
+    # AGPL-3.0. A missing weights file makes the detector UNAVAILABLE; it is
+    # never downloaded at runtime.
+    object_detection_enabled: bool = True
+    object_detection_model_path: Path = BASE_DIR / "yolov8n.pt"
     ai_image_model_path: Optional[Path] = None
     deepfake_model_path: Optional[Path] = None
     audio_model_path: Optional[Path] = None

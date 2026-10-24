@@ -74,6 +74,7 @@ _CONFIG_SNAPSHOT_KEYS = (
     "trufor_tile_overlap",
     "univfd_enabled",
     "univfd_threshold",
+    "object_detection_enabled",
     "similarity_embedding_enabled",
     "similarity_phash_max_distance",
     "similarity_cosine_min",
@@ -1002,6 +1003,17 @@ class AnalysisPipeline:
             if _SIGNAL_FAMILY.get(d.detector) == "ai_generation"
         ]
         if not dets:
+            # The detector is configured for images; videos never reach it, and
+            # "no detector is configured" was untrue for them.
+            if detections and all(getattr(d, "media_type", None) == "video" for d in detections):
+                return {
+                    "status": "UNAVAILABLE",
+                    "detector": None,
+                    "reason": "image_only",
+                    "rationale": "The AI-generation check runs on still images. "
+                                 "Video frames are not checked for AI generation yet, "
+                                 "so whether this video was generated was not assessed.",
+                }
             return {
                 "status": "UNAVAILABLE",
                 "detector": None,

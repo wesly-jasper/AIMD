@@ -1,9 +1,15 @@
 import type { Detection, Observation } from "../types";
 import {
-  OUTCOME_LABEL, checkName, checkWhat, outcomeOf, unavailableReason, type CheckOutcome,
+  OUTCOME_LABEL, checkName, checkWhat, contextSummary, outcomeOf, unavailableReason, type CheckOutcome,
 } from "../plain";
 
-const ORDER: CheckOutcome[] = ["found", "nothing", "undecided", "unavailable"];
+const ORDER: CheckOutcome[] = ["found", "nothing", "undecided", "context", "unavailable"];
+
+function detail(d: Detection, outcome: CheckOutcome): string {
+  if (outcome === "unavailable") return unavailableReason(d);
+  if (outcome === "context") return `${contextSummary(d)} · not evidence of editing`;
+  return checkWhat(d.detector);
+}
 
 /**
  * What we checked: one segment per check that was invoked on this file.
@@ -50,9 +56,7 @@ export function WhatWeChecked({
             <span className={"swatch " + outcome} aria-hidden="true" />
             <span className="check-text">
               <span className="check-name">{checkName(d.detector)}</span>
-              <span className="sub">
-                {outcome === "unavailable" ? unavailableReason(d) : checkWhat(d.detector)}
-              </span>
+              <span className="sub">{detail(d, outcome)}</span>
             </span>
             <span className={"outcome " + outcome}>{OUTCOME_LABEL[outcome]}</span>
           </li>

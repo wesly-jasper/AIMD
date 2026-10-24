@@ -10,7 +10,10 @@ from app.services.detection.models.trufor_runner import (
 from app.services.detection.detectors.image.univfd_detector import UnivFDDetector
 from app.services.detection.models.univfd_runner import UnivFDRunner
 from app.services.detection.detectors.face_detector import BaselineFaceDetector
-from app.services.detection.detectors.object_detector import BaselineObjectDetector
+from app.services.detection.detectors.object_detector import (
+    BaselineObjectDetector,
+    YOLOv8ObjectDetector,
+)
 from app.services.detection.detectors.audio_detector import BaselineAudioAnalyzer
 from app.services.detection.detectors.video_detector import BaselineVideoDetector
 from app.services.detection.detectors.image.forensic_image_detector import ForensicImageDetector
@@ -81,7 +84,10 @@ class DetectorFactory:
 
     @staticmethod
     def create_object_detector():
-        return BaselineObjectDetector()
+        if not settings.object_detection_enabled:
+            return BaselineObjectDetector()
+        device = None if settings.device in ("", "auto") else settings.device
+        return YOLOv8ObjectDetector(str(settings.object_detection_model_path), device=device)
 
     @staticmethod
     def create_audio_detector():

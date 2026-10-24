@@ -145,26 +145,42 @@ export function checkWhat(detector: string): string {
   return CHECKS[detector]?.what ?? "";
 }
 
-export type CheckOutcome = "found" | "nothing" | "undecided" | "unavailable";
+export type CheckOutcome = "found" | "nothing" | "undecided" | "context" | "unavailable";
 
 export const OUTCOME_LABEL: Record<CheckOutcome, string> = {
   found: "Found signs",
   nothing: "Found nothing",
   undecided: "Couldn't decide",
+  context: "Context only",
   unavailable: "Not available",
 };
+
+/** Checks that describe the picture and never weigh on whether it was edited. */
+const CONTEXT_ONLY = new Set(["YOLOv8ObjectDetector", "BaselineObjectDetector"]);
 
 export function outcomeOf(d: Detection, observations: Observation[]): CheckOutcome {
   const o = observations.find((x) => x.detection_id === d.id);
   if (!o) return "unavailable";
+  if (CONTEXT_ONLY.has(d.detector)) return "context";
   if (o.polarity === "ANOMALY_OBSERVED") return "found";
   if (o.polarity === "NO_ANOMALY_OBSERVED") return "nothing";
   return "undecided";
 }
 
+/** What a context-only check saw: "person, 2 dogs" from object regions. */
+export function contextSummary(d: Detection): string {
+  const counts = new Map<string, number>();
+  for (const r of d.regions) {
+    const name = r.type.replace(/^object_/, "");
+    counts.set(name, (counts.get(name) ?? 0) + 1);
+  }
+  if (counts.size === 0) return "Nothing recognised in the picture";
+  return "Saw " + [...counts].map(([name, n]) => (n === 1 ? name : `${n} × ${name}`)).join(", ");
+}
+
 /** Why a check is "not available", in plain words. */
 export function unavailableReason(d: Detection): string {
-  if (d.availability === "UNAVAILABLE") return "Not installed on this service";
+  if (d.availability === "UNAVAILABLE") return "Not set up on this server";
   if (d.execution_status === "FAILED") return "Failed while running";
   return d.status_reason ?? "Did not run";
 }

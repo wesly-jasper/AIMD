@@ -33,8 +33,8 @@ def _usage(**on):
     return x509.KeyUsage(**{**flags, **on})
 
 
-@pytest.fixture(scope="module")
-def signer():
+def make_chain():
+    """A throwaway root and ES256 signer: (signer chain PEM, signer key PEM, root PEM)."""
     now = datetime.datetime.now(datetime.timezone.utc)
     valid = dict(not_valid_before=now - datetime.timedelta(days=1),
                  not_valid_after=now + datetime.timedelta(days=30))
@@ -60,11 +60,23 @@ def signer():
             .add_extension(x509.AuthorityKeyIdentifier.from_issuer_public_key(ca_key.public_key()),
                            critical=False)
             .sign(ca_key, hashes.SHA256()))
-    chain = cert.public_bytes(serialization.Encoding.PEM) + ca.public_bytes(serialization.Encoding.PEM)
+    root = ca.public_bytes(serialization.Encoding.PEM)
+    chain = cert.public_bytes(serialization.Encoding.PEM) + root
     private = key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8,
                                 serialization.NoEncryption())
+    return chain, private, root
+
+
+@pytest.fixture(scope="module")
+def chain():
+    return make_chain()
+
+
+@pytest.fixture(scope="module")
+def signer(chain):
+    cert_chain, private, _root = chain
     return c2pa.Signer.from_info(c2pa.C2paSignerInfo(
-        alg=b"es256", sign_cert=chain, private_key=private, ta_url=None))
+        alg=b"es256", sign_cert=cert_chain, private_key=private, ta_url=None))
 
 
 def sign(signer, tmp_path, source_type=CAPTURE, name="signed.jpg"):
@@ -142,3 +154,28 @@ def test_an_intact_signature_time_is_a_metadata_claim_on_the_timeline():
     assert event["timestamp"] == "2024-03-01T10:00:00+00:00"
     assert "untrusted" in event["description"]
     assert build_timeline([], c2pa={**credentials, "status": "INVALID"})["events"] == []
+
+
+def test_a_signer_on_the_trust_list_is_trusted(chain, signer, tmp_path):
+    anchors = tmp_path / "anchors.pem"
+    anchors.write_bytes(chain[2])
+    result = verify_c2pa(sign(signer, tmp_path), trust_anchors=anchors)
+    assert result["status"] == "TRUSTED"
+    assert result["trusted_signer"] is True
+    assert result["trust_list"]["loaded"] is True
+    assert result["trust_list"]["anchors"] == 1
+
+
+def test_a_signer_off_the_trust_list_stays_valid(signer, tmp_path):
+    _, _, other_root = make_chain()
+    anchors = tmp_path / "other.pem"
+    anchors.write_bytes(other_root)
+    result = verify_c2pa(sign(signer, tmp_path), trust_anchors=anchors)
+    assert result["status"] == "VALID"
+    assert "signingCredential.untrusted" in {f["code"] for f in result["failures"]}
+
+
+def test_without_a_trust_list_the_record_says_so(signer, tmp_path):
+    result = verify_c2pa(sign(signer, tmp_path), trust_anchors=tmp_path / "missing.pem")
+    assert result["status"] == "VALID"
+    assert result["trust_list"] == {"loaded": False}

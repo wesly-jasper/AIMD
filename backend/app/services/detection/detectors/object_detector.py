@@ -85,6 +85,13 @@ class YOLOv8ObjectDetector(BaseObjectDetector):
 
     def load(self):
         self._load_attempted = True
+        # Given a bare known name ("yolov8n.pt") or a missing path, Ultralytics
+        # downloads the weights from the internet. A server must not fetch code
+        # or weights on a request, so a missing file is reported instead.
+        if not Path(self.model_name).is_file():
+            self._load_error = "weights file not found"
+            logger.warning(f"YOLOv8 weights not found: {Path(self.model_name).name}")
+            return
         try:
             from ultralytics import YOLO
 
@@ -116,9 +123,10 @@ class YOLOv8ObjectDetector(BaseObjectDetector):
             self.load()
         if self._loaded and self._model is not None:
             return DetectorAvailability.AVAILABLE, None
+        # The file name only: the configured path is a host path.
         return (
             DetectorAvailability.UNAVAILABLE,
-            f"YOLOv8 model {self.model_name} could not be loaded "
+            f"YOLOv8 model {Path(self.model_name).name} could not be loaded "
             f"({self._load_error or 'unknown reason'})",
         )
 

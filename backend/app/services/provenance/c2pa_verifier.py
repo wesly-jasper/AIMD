@@ -11,7 +11,10 @@ What a result means, and does not:
   VALID        the manifest is intact and its signature verifies, but the signer
                is not on a trust list. Anyone can create such a certificate, so
                the claims are only as good as an unknown signer.
-  TRUSTED      intact, and signed by a certificate on the configured trust list.
+  TRUSTED      intact, and signed by a certificate that chains to the configured
+               trust list (by default the official C2PA Trust List, installed
+               by scripts/fetch_c2pa_trust_list.py). With no list installed
+               nothing can be TRUSTED, and the result says so.
   UNAVAILABLE  the C2PA library is not installed.
   FAILED       the library could not read the file.
 
@@ -22,9 +25,13 @@ signer's declaration, beside -- never inside -- the detector verdicts.
 """
 from __future__ import annotations
 
+import hashlib
 import logging
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Optional
+
+from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -59,16 +66,42 @@ def _actions(manifest: dict) -> list[dict[str, Any]]:
     return out
 
 
-def verify_c2pa(file_path: Path | str) -> dict[str, Any]:
-    """The C2PA outcome for one file; never raises."""
+@lru_cache(maxsize=4)
+def _trust(path: Optional[str]) -> tuple[Optional[str], dict[str, Any]]:
+    """The trust anchors PEM at ``path`` and a description of it for the record."""
+    if not path or not Path(path).is_file():
+        return None, {"loaded": False}
+    pem = Path(path).read_text(encoding="utf-8")
+    return pem, {
+        "loaded": True,
+        "name": Path(path).stem,
+        "anchors": pem.count("BEGIN CERTIFICATE"),
+        "sha256": hashlib.sha256(pem.encode()).hexdigest(),
+    }
+
+
+def verify_c2pa(file_path: Path | str, trust_anchors: Optional[Path | str] = None) -> dict[str, Any]:
+    """
+    The C2PA outcome for one file; never raises.
+
+    ``trust_anchors`` is a PEM bundle of root certificates; by default the
+    configured C2PA trust list. A signer chaining to one of them is TRUSTED.
+    """
     try:
         import c2pa
     except ImportError:
         return {"status": "UNAVAILABLE", "reason": "c2pa-python is not installed"}
 
-    base = {"sdk_version": c2pa.sdk_version()}
+    anchors = trust_anchors if trust_anchors is not None else settings.c2pa_trust_anchors_path
+    pem, trust_list = _trust(str(anchors) if anchors else None)
+    base = {"sdk_version": c2pa.sdk_version(), "trust_list": trust_list}
     try:
-        reader = c2pa.Reader.try_create(str(file_path))
+        context = None
+        if pem:
+            context = c2pa.Context(c2pa.Settings.from_dict(
+                {"trust": {"trust_anchors": pem}, "verify": {"verify_trust": True}}
+            ))
+        reader = c2pa.Reader.try_create(str(file_path), context=context)
     except Exception as exc:
         # A manifest that cannot even be parsed is a broken manifest, not none.
         logger.info("C2PA read failed for %s: %s", file_path, exc)

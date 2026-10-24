@@ -183,12 +183,29 @@ export interface Timeline {
   note: string | null;
 }
 
+export interface C2paAction {
+  action: string | null;
+  when: string | null;
+  software_agent: string | null;
+  digital_source_type: string | null;
+}
+
 export interface ContentCredentials {
   status: "TRUSTED" | "VALID" | "INVALID" | "NO_MANIFEST" | "UNAVAILABLE" | "FAILED" | string;
   reason?: string;
-  signer?: { common_name: string | null; issuer: string | null; signed_at: string | null };
+  sdk_version?: string;
+  /** The root certificates a signer was checked against; absent on older records. */
+  trust_list?: { loaded: boolean; name?: string; anchors?: number; sha256?: string };
+  trusted_signer?: boolean;
+  signer?: { common_name: string | null; issuer: string | null; algorithm?: string | null; signed_at: string | null };
   claim_generator?: string | null;
+  title?: string | null;
+  embedded?: boolean;
+  actions?: C2paAction[];
   digital_source_types?: string[];
+  /** The signer's declaration of AI generation, while the manifest is intact. */
+  ai_generation_declared?: boolean;
+  ingredients?: number;
   failures?: { code: string | null; explanation: string | null }[];
 }
 
