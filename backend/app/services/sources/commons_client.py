@@ -212,7 +212,15 @@ class CommonsClient:
         for attempt in range(self.max_retries + 1):
             self._pace()
             request = self._client.build_request(method, url, **kwargs)
-            response = self._client.send(request, stream=True)
+            try:
+                response = self._client.send(request, stream=True)
+            except httpx.TransportError as exc:
+                # A timeout or dropped connection before the headers: retried
+                # with a backoff, then reported as an error the caller can skip.
+                if attempt == self.max_retries:
+                    raise CommonsError(f"{type(exc).__name__} from {request.url.host}") from exc
+                self._sleep(min(self.max_retry_after, 5.0 * (attempt + 1)))
+                continue
             if response.status_code not in _RETRY_STATUSES:
                 if response.status_code >= 400:
                     response.close()

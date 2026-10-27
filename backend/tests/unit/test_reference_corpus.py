@@ -277,6 +277,27 @@ def test_download_stalled_mid_body_is_a_skippable_error(tmp_path):
             client.download("https://upload.wikimedia.org/a.jpg", tmp_path / "a.jpg", max_bytes=10**7)
     assert list(tmp_path.iterdir()) == []
 
+
+def test_a_request_that_times_out_is_retried_then_reported(tmp_path):
+    calls = []
+
+    def handler(request):
+        calls.append(request)
+        if len(calls) < 3:
+            raise httpx.ReadTimeout("no headers", request=request)
+        return httpx.Response(200, headers={"content-type": "image/jpeg"}, content=b"jpeg")
+
+    sleeps = []
+    with CommonsClient("t@example.invalid", min_interval=0, sleep=sleeps.append, max_retries=5,
+                       transport=httpx.MockTransport(handler)) as client:
+        _, size, _ = client.download("https://upload.wikimedia.org/a.jpg", tmp_path / "a.jpg", max_bytes=10**7)
+    assert size == 4 and len(calls) == 3 and sleeps == [5.0, 10.0]
+
+    with CommonsClient("t@example.invalid", min_interval=0, sleep=lambda s: None, max_retries=1,
+                       transport=httpx.MockTransport(lambda r: (_ for _ in ()).throw(httpx.ConnectError("down")))) as client:
+        with pytest.raises(CommonsError, match="ConnectError"):
+            client.download("https://upload.wikimedia.org/b.jpg", tmp_path / "b.jpg", max_bytes=10**7)
+
 # ── Building the corpus ──────────────────────────────────────────────────────
 
 def test_build_indexes_each_file_with_its_citation_and_fingerprints(db, tmp_path):
