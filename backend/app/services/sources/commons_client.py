@@ -350,12 +350,16 @@ class CommonsClient:
             if not content_type.startswith("image/"):
                 raise CommonsError(f"expected an image, got {content_type or 'no content type'}")
             with open(partial, "wb") as fh:
-                for chunk in response.iter_bytes():
-                    size += len(chunk)
-                    if size > max_bytes:
-                        raise CommonsError(f"download exceeds {max_bytes} bytes")
-                    digest.update(chunk)
-                    fh.write(chunk)
+                try:
+                    for chunk in response.iter_bytes():
+                        size += len(chunk)
+                        if size > max_bytes:
+                            raise CommonsError(f"download exceeds {max_bytes} bytes")
+                        digest.update(chunk)
+                        fh.write(chunk)
+                except httpx.TransportError as exc:
+                    # Stalled mid-body: the caller skips this file, the .part goes.
+                    raise CommonsError(f"download interrupted: {type(exc).__name__}") from exc
             os.replace(partial, dest)
         finally:
             response.close()

@@ -261,6 +261,22 @@ def test_download_refuses_a_non_image_and_an_oversized_file(tmp_path):
     assert list(tmp_path.iterdir()) == []
 
 
+
+def test_download_stalled_mid_body_is_a_skippable_error(tmp_path):
+    class Stalls(httpx.SyncByteStream):
+        def __iter__(self):
+            yield b"partial"
+            raise httpx.ReadTimeout("stalled")
+
+    def handler(request):
+        return httpx.Response(200, headers={"content-type": "image/jpeg"}, stream=Stalls())
+
+    with CommonsClient("t@example.invalid", min_interval=0, sleep=lambda s: None,
+                       transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(CommonsError, match="interrupted"):
+            client.download("https://upload.wikimedia.org/a.jpg", tmp_path / "a.jpg", max_bytes=10**7)
+    assert list(tmp_path.iterdir()) == []
+
 # ── Building the corpus ──────────────────────────────────────────────────────
 
 def test_build_indexes_each_file_with_its_citation_and_fingerprints(db, tmp_path):
