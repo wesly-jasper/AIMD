@@ -133,22 +133,21 @@ class BaselineFaceDetector(BaseFaceDetector):
                 },
             )
 
-        return DetectionResult(
-            detector=self.detector_id,
-            detector_version=self.version,
+        # Faces were located, and that is all this establishes. The anomaly score
+        # is hand-thresholded Laplacian variance and FFT ratios, never fitted to
+        # labelled data; reported as SUSPICIOUS it flagged a genuine camera photo
+        # and drove most SUSPICIOUS verdicts in the end-to-end run. Like the other
+        # uncalibrated heuristics it is kept for an examiner, not counted.
+        return self.inconclusive(
+            "Uncalibrated heuristic: faces were located; their boundary and texture "
+            "scores are kept for examiner review and do not support a determination.",
             media_type="image",
-            manipulation_detected=overall_manipulation,
-            confidence=round(max_face_confidence, 4),
-            manipulation_type=self.manipulation_type,
-            availability=DetectorAvailability.AVAILABLE,
-            execution_status=DetectorExecutionStatus.COMPLETED,
-            # Laplacian boundary variance and texture-frequency ratios, both
-            # hand-thresholded. Not a trained deepfake classifier output.
-            score_semantics=ScoreSemantics.HEURISTIC_SEVERITY,
             regions=regions,
             metadata={
                 "status": self.status,
                 "faces_detected": len(regions),
+                "heuristic_max_score": round(max_face_confidence, 4),
+                "heuristic_flagged": overall_manipulation,
                 "method": "Cascade Detection + Boundary Gradient & Texture Frequency Forensics",
             },
         )
@@ -320,23 +319,19 @@ class DeepLearningFaceDetector(BaseFaceDetector):
                 },
             )
 
-        return DetectionResult(
-            detector=self.detector_id,
-            detector_version=self.version,
+        # MTCNN supplies the face *location*; the anomaly score is still
+        # hand-thresholded Laplacian variance and FFT ratios, so it is kept for an
+        # examiner and does not support a determination (see the cascade above).
+        return self.inconclusive(
+            "Uncalibrated heuristic: faces were located; their boundary and spectrum "
+            "scores are kept for examiner review and do not support a determination.",
             media_type="image",
-            manipulation_detected=overall_manipulation,
-            confidence=round(max_anomaly, 4),
-            manipulation_type=self.manipulation_type,
-            availability=DetectorAvailability.AVAILABLE,
-            execution_status=DetectorExecutionStatus.COMPLETED,
-            # MTCNN supplies the face *location*; the anomaly score is still
-            # hand-thresholded Laplacian variance and FFT ratios. Neural
-            # localisation does not make the manipulation score a model output.
-            score_semantics=ScoreSemantics.HEURISTIC_SEVERITY,
             regions=regions,
             metadata={
                 "status": "active_mtcnn_deepfake_detector",
                 "faces_detected": len(regions),
+                "heuristic_max_score": round(max_anomaly, 4),
+                "heuristic_flagged": overall_manipulation,
                 "method": "MTCNN Neural Face Localization + Multi-Scale Boundary & Spectrum Forensics",
             },
         )

@@ -334,3 +334,44 @@ def test_live_token_factory_investigation(monkeypatch):
         assert set(citation["tool_call_ids"]) <= trace_ids
     assert not any(f["type"] == "unknown_citation" for f in outcome.flags), outcome.flags
     assert outcome.usage["total_tokens"] > 0
+
+
+# ── A URL the user supplies is always checked ─────────────────────────────────
+
+def _completion(content: str) -> dict:
+    return {
+        "id": "chatcmpl-url", "object": "chat.completion", "created": 0, "model": settings.nemotron_model,
+        "choices": [{"index": 0, "finish_reason": "stop",
+                     "message": {"role": "assistant", "content": content}}],
+        "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+    }
+
+
+def test_a_supplied_source_url_is_verified_before_the_model_runs(agent_slot):
+    """
+    The live run never called verify_source_match for the URL the user gave, so
+    the investigation said nothing about it. AIMD now makes that call itself, as
+    T1 in step 0, and the model sees the result before its first turn.
+    """
+    from tests.unit.test_investigation_agent_parts import _UrlSource
+
+    url = "https://commons.wikimedia.org/wiki/File:Example.jpg"
+    source = _UrlSource()
+    fake = RecordedClient([_completion("AIMD fetched the supplied page and found a verified match [T1].")])
+    agent_slot(NemotronAgent(client_factory=lambda: fake, url_source_factory=source))
+    analysis_id = seed_analysis()
+
+    assert client.post(f"/api/v1/analysis/{analysis_id}/investigate", json={"source_url": url}).status_code == 202
+    result = client.get(f"/api/v1/analysis/{analysis_id}/investigation").json()
+
+    assert result["status"] == "COMPLETED", result
+    first = result["tool_calls"][0]
+    assert (first["id"], first["name"], first["step"]) == ("T1", "verify_source_match", 0)
+    assert first["result"]["hits"][0]["verification_status"] == "VERIFIED_MATCH"
+    assert source.queries[0].claimed_url == url
+    assert result["grounded"] is True and "[T1]" in result["summary"]["text"]
+
+    sent = fake.requests[0]["messages"]
+    assert sent[-2]["role"] == "assistant" and sent[-2]["tool_calls"][0]["function"]["name"] == "verify_source_match"
+    assert sent[-1]["role"] == "tool" and json.loads(sent[-1]["content"])["tool_call_id"] == "T1"
+    assert "tool call T1" in sent[1]["content"]

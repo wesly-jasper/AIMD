@@ -239,28 +239,26 @@ class AnalysisPipeline:
             assessment, evidence_strength = self._compute_final_assessment(
                 analysis_id, db
             )
-            repo.update_analysis_status(
-                db, analysis_id,
-                status="PROCESSING",
-                assessment=assessment,
-                evidence_strength=evidence_strength,
-            )
             self._run_forensic_record(analysis_id, db, stage_failures)
 
-            # ── Stage 9: Report ───────────────────────────────────────────────
-            logger.info("[%s] Stage 9: Report generation", analysis_id)
-            self._run_report(analysis_id, db, stage_failures)
-
-            # ── Finalize ──────────────────────────────────────────────────────
+            # ── Status, then Stage 9: Report ──────────────────────────────────
+            # The report states the analysis status, so it is set first. It was
+            # set after, and every stored report said PROCESSING.
             final_status = "PARTIAL" if stage_failures else "COMPLETED"
-            self._finish_run(analysis_id, db, started)
-
             repo.update_analysis_status(
                 db, analysis_id,
                 status=final_status,
                 assessment=assessment,
                 evidence_strength=evidence_strength,
             )
+            logger.info("[%s] Stage 9: Report generation", analysis_id)
+            self._run_report(analysis_id, db, stage_failures)
+            if stage_failures and final_status == "COMPLETED":  # the report itself failed
+                final_status = "PARTIAL"
+                repo.update_analysis_status(db, analysis_id, status=final_status)
+
+            # ── Finalize ──────────────────────────────────────────────────────
+            self._finish_run(analysis_id, db, started)
 
             logger.info(
                 "[%s] Pipeline complete -- status=%s assessment=%s strength=%s",

@@ -4,6 +4,18 @@
 
 > **Update:** C1, C2 and M2 are fixed, with tests (`tests/unit/test_metadata_exif.py`, `tests/unit/test_safe_errors.py`, `tests/integration/test_failure_reporting.py`). Rerun: all 4 camera originals that returned 500 now upload, with 43–59 EXIF fields each, including exposure time and f-number. One analysed to PARTIAL, the only gap being MediaPipe (H2). Full suite: 595 passed, 4 skipped.
 
+> **Update 2:**
+> - **H2:** `mediapipe` installed without its OpenCV dependency; see the note in `requirements.txt`. Face edits now runs, and analyses come out COMPLETED with conclusive verdicts (the real photo: "No signs of editing found").
+> - **H6:** upload type now comes from the file's bytes; images must decode and videos must open.
+> - **M3:** a supplied URL is verified by AIMD itself, as T1, before the model starts.
+> - **M4:** the report states the final status and includes the latest investigation (INFERENCE).
+> - **M5:** both face heuristics are INCONCLUSIVE with their scores kept for examiner review. Measured on Commons portraits, genuine faces (0.52–0.53) scored *above* 4 of 5 AI faces (0.38–0.52).
+> - **M6:** detection IDs are no longer shown as limitations.
+> - **L1:** login also accepts `email`. Correction to the original finding: every success response is bare JSON and every error uses the envelope, which is consistent.
+> - **L3:** `c2pa-python` 0.38 installed; the c2pa-rs signed fixtures verify as VALID.
+> - **H3 (partly):** a live Commons lookup by SHA-1 finds byte-identical copies; it needs `WIKIMEDIA_CONTACT` set. Web-wide reverse search still needs a Google Vision or TinEye key. The providers exist in `internet_search_provider.py` but are not wired into the pipeline.
+> - **H4, not changed:** TruFor's region confidences don't separate edits from noise. The copy-move region scored 0.65, a genuine photo had regions at 0.64, and an AI image one at 0.90. Any threshold that caught the copy-move would flag the genuine photo.
+
 ## 1. Summary
 
 The full flow (sign up → upload → analyse → investigate → report) runs through both the API and the UI. Every panel reads real data, and Nemotron investigations complete with citations that resolve. TruFor localises splices almost exactly.
@@ -109,13 +121,13 @@ Of the 6 SUSPICIOUS verdicts on AI or real images, 4 came from the `BaselineFace
 
 <a id="h1"></a>**H1. AI-generation recall is 33%; Midjourney 0%.** UnivFD (ProGAN-trained) can't be the only AI detector. Add a diffusion-era detector, for example a CLIP-based model fine-tuned on SD/MJ/DALL·E 3, or DIRE / AEROBLADE-style reconstruction checks. Report ensemble agreement rather than one score. Also consider showing a note that NOT_INDICATED is weak evidence for Midjourney-style imagery, which the UI already partly does.
 
-<a id="h2"></a>**H2. Every analysis is PARTIAL, so no conclusion is possible.**
+<a id="h2"></a>**H2 (fixed). Every analysis is PARTIAL, so no conclusion is possible.**
 - `FaceRegionAnalyzer` is UNAVAILABLE: `mediapipe` is in `requirements.txt` but not installed.
 - `BaselineObjectDetector` is UNAVAILABLE: no model configured.
 - The `incomplete_coverage` rule then blocks any CLEAN result.
 - **Fix:** install `mediapipe`. Then either ship the object model or stop counting a not-configured, non-evidential detector as a coverage gap, and only count detectors that apply to the file (e.g. no faces → face edits not applicable).
 
-<a id="h3"></a>**H3. Source discovery doesn't search the web.**
+<a id="h3"></a>**H3 (partly fixed). Source discovery doesn't search the web.**
 - The "Wikimedia Commons" connector is an offline corpus of 500 pre-fetched images ([wikimedia_corpus.py](../backend/app/services/sources/wikimedia_corpus.py)).
 - Wayback only checks URLs that come from corpus hits, so for any other image it does nothing.
 - **Effect:** 22 images downloaded from Commons minutes earlier, including one exact byte-for-byte original, all show "Wikimedia Commons: 0 found". The UI wording suggests Commons itself was searched.
@@ -123,7 +135,7 @@ Of the 6 SUSPICIOUS verdicts on AI or real images, 4 came from the `BaselineFace
   - Add a live lookup: the Commons API `list=allimages&aisha1=` for exact matches, plus a reverse-image provider (TinEye / Google Lens / Bing Visual Search API).
   - Relabel the current connector "Reference corpus (500 Commons images)".
 
-<a id="h4"></a>**H4. Localisation evidence is discarded by the image-level threshold.** On the copy-move test, TruFor boxed the pasted block (confidence 0.65), but its global score of 0.37 was under threshold, so the verdict was CLEAN with "No area was marked". Surface high-confidence localised regions as an observation even when the global score is low, or use the peak of the localisation map in the decision. The SIFT copy-move detector also needs tuning: it returned "insufficient matches" on a 320 × 300 copied block.
+<a id="h4"></a>**H4 (not changed: see update). Localisation evidence is discarded by the image-level threshold.** On the copy-move test, TruFor boxed the pasted block (confidence 0.65), but its global score of 0.37 was under threshold, so the verdict was CLEAN with "No area was marked". Surface high-confidence localised regions as an observation even when the global score is low, or use the peak of the localisation map in the decision. The SIFT copy-move detector also needs tuning: it returned "insufficient matches" on a 320 × 300 copied block.
 
 <a id="h5"></a>**H5. Video analysis is thin.**
 - Only the temporal engine runs, at 1 fps. The AI-generation branch is UNAVAILABLE for video, and TruFor/UnivFD don't run on keyframes.
@@ -131,7 +143,7 @@ Of the 6 SUSPICIOUS verdicts on AI or real images, 4 came from the `BaselineFace
 - The run is still marked **COMPLETED**, not PARTIAL, despite that coverage.
 - **Fix:** run the image detectors on keyframes, add shot-cut detection, and make the status reflect missing branches.
 
-<a id="h6"></a>**H6. Uploads trust the client's declared MIME type.**
+<a id="h6"></a>**H6 (fixed). Uploads trust the client's declared MIME type.**
 - [media_ingestion.py:104](../backend/app/services/ingestion/media_ingestion.py) checks only the declared Content-Type, and `_detect_media_type` falls back to it when the magic bytes don't match.
 - **Effects:**
   - An HTML page and a plain-text file declared as `image/*` were accepted as images, then "analysed" to a PARTIAL result.
@@ -160,27 +172,27 @@ Of the 6 SUSPICIOUS verdicts on AI or real images, 4 came from the `BaselineFace
 - There's no indication anything went wrong, and no progress indicator while an analysis is still processing.
 - **Fix:** render FAILED explicitly with the safe reason ([C2](#c2)) and a "Try again" action. Show a spinner for QUEUED/PROCESSING.
 
-<a id="m3"></a>**M3. The investigation's source URL is ignored.** With the image's real Commons URL supplied, the agent called overview, detections and sources, never `verify_source_match`, and its summary says no URL was verified. If a URL is given, the backend should run `verify_source_match` deterministically before the agent loop and give the agent the result, rather than leaving it to the model's discretion.
+<a id="m3"></a>**M3 (fixed). The investigation's source URL is ignored.** With the image's real Commons URL supplied, the agent called overview, detections and sources, never `verify_source_match`, and its summary says no URL was verified. If a URL is given, the backend should run `verify_source_match` deterministically before the agent loop and give the agent the result, rather than leaving it to the model's discretion.
 
-<a id="m4"></a>**M4. The stored report is stale and incomplete.**
+<a id="m4"></a>**M4 (fixed). The stored report is stale and incomplete.**
 - It's generated as a pipeline stage ([analysis_pipeline.py:815](../backend/app/services/orchestration/analysis_pipeline.py)) before the final status is saved, so every report says `Investigation Status: PROCESSING`.
 - That label means the *analysis* status, which is confusing now that "Investigation" means the Nemotron run.
 - The report is never regenerated, so the Nemotron summary and its trace never appear in it.
 - **Fix:** write the report after the final status, rename the field "Analysis status", and regenerate (or render on demand) when an investigation completes. Consider a server-side PDF (WeasyPrint) so "Download PDF" is a real file.
 
-<a id="m5"></a>**M5. `BaselineFaceDetector` drives false SUSPICIOUS verdicts.** It flagged a genuine camera photo and 3 AI images as SUSPICIOUS (0.55–0.80), and its UI label is "Face finding: locates faces so face checks can run". A face *locator* shouldn't vote on manipulation. Make it non-evidential, or calibrate it.
+<a id="m5"></a>**M5 (fixed). `BaselineFaceDetector` drives false SUSPICIOUS verdicts.** It flagged a genuine camera photo and 3 AI images as SUSPICIOUS (0.55–0.80), and its UI label is "Face finding: locates faces so face checks can run". A face *locator* shouldn't vote on manipulation. Make it non-evidential, or calibrate it.
 
-<a id="m6"></a>**M6. Branch card shows raw UUIDs (Day 6 UI bug).** Manipulation → Limitations lists `assessment_detail.coverage_gaps`, which are detection IDs (`c2c807f0-…`), as text, next to the same detectors listed by name. Map the IDs to detector names, or drop them, since `missing` already covers them. See [Panels.tsx:57](../web/src/components/Panels.tsx).
+<a id="m6"></a>**M6 (fixed). Branch card shows raw UUIDs (Day 6 UI bug).** Manipulation → Limitations lists `assessment_detail.coverage_gaps`, which are detection IDs (`c2c807f0-…`), as text, next to the same detectors listed by name. Map the IDs to detector names, or drop them, since `missing` already covers them. See [Panels.tsx:57](../web/src/components/Panels.tsx).
 
 ### Low
 
-<a id="l1"></a>**L1. Inconsistent API shapes.**
+<a id="l1"></a>**L1 (fixed). Inconsistent API shapes.**
 - Sign-up takes `email`; login takes `username` for the same value.
 - Login and upload return bare JSON, while errors and most other endpoints use the `{success, data, error}` envelope.
 
-**L2. Failed uploads leave state behind.** The file is written to `uploads/` before the DB write that fails.
+**L2 (fixed with C1/H6). Failed uploads leave state behind.** The file is written to `uploads/` before the DB write that fails.
 
-**L3. C2PA is never checked.** `c2pa-python` isn't installed, so Content Credentials are UNAVAILABLE on every file. That matters most for DALL·E 3 / Firefly images, which carry C2PA manifests (the Commons renditions tested here had them stripped).
+**L3 (fixed). C2PA is never checked.** `c2pa-python` isn't installed, so Content Credentials are UNAVAILABLE on every file. That matters most for DALL·E 3 / Firefly images, which carry C2PA manifests (the Commons renditions tested here had them stripped).
 
 ## 5. What works well
 

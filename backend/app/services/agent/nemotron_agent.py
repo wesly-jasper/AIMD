@@ -22,6 +22,7 @@ result, a trace or a log line.
 """
 from __future__ import annotations
 
+import json
 import logging
 import time
 from dataclasses import dataclass, field
@@ -192,7 +193,10 @@ class NemotronAgent:
         client = self._client()
         user = "Investigate this analysis and summarise what its results do and do not show."
         if source_url:
-            user += f" The uploader says the image came from: {source_url}"
+            user += (
+                f" The uploader says the image came from: {source_url}. AIMD has already "
+                "fetched that URL and compared it with the file; the result is tool call T1."
+            )
         messages: list[dict] = [
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": user},
@@ -201,6 +205,15 @@ class NemotronAgent:
         results: dict[str, str] = {}   # T-id -> the exact text the model received
         usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "calls": []}
         outcome.usage = usage
+
+        if source_url:
+            # A URL the user supplied is always checked. Leaving it to the model,
+            # it went unverified: the live run called the overview, detections and
+            # sources tools and never verify_source_match. Step 0 is AIMD's own.
+            self._record_call(
+                ctx, outcome, messages, results, step=0, provider_call_id="aimd-source-url",
+                name="verify_source_match", arguments=json.dumps({"url": source_url}),
+            )
 
         final: Optional[str] = None
         for step in range(1, s.agent_max_steps + 1):
@@ -251,25 +264,49 @@ class NemotronAgent:
                 ],
             })
             for tc in tool_calls:
-                cid = f"T{len(outcome.tool_calls) + 1}"
-                t1 = self._clock()
-                if len(outcome.tool_calls) >= MAX_TOOL_CALLS:
-                    entry = {"name": tc.function.name, "arguments": tc.function.arguments,
-                             "category": None, "error": "tool call budget for this investigation is spent"}
-                else:
-                    entry = agent_tools.execute(ctx, tc.function.name, tc.function.arguments)
-                # ``step`` groups the calls the model chose together: the plan, as executed.
-                entry = {"id": cid, "provider_call_id": tc.id, "step": step, **entry,
-                         "latency_ms": int((self._clock() - t1) * 1000)}
-                outcome.tool_calls.append(entry)
-                payload = {"tool_call_id": cid, "tool": entry["name"], "category": entry["category"]}
-                payload.update({"error": entry["error"]} if "error" in entry else {"result": entry["result"]})
-                content = agent_tools.serialise(payload)
-                results[cid] = content
-                messages.append({"role": "tool", "tool_call_id": tc.id, "content": content})
+                self._record_call(
+                    ctx, outcome, messages, results, step=step, provider_call_id=tc.id,
+                    name=tc.function.name, arguments=tc.function.arguments, announce=False,
+                )
 
         if not final or not final.strip():
             raise _ModelUnavailable(f"model gave no summary within {outcome.steps} steps")
+        self._finish_grounding(final, results, outcome)
+
+    def _record_call(
+        self, ctx, outcome: InvestigationOutcome, messages: list, results: dict, *,
+        step: int, provider_call_id: str, name: str, arguments: Optional[str], announce: bool = True,
+    ) -> None:
+        """
+        Run one tool call, add it to the trace as ``T<n>`` and give its result to
+        the model. ``announce`` adds the assistant turn that requests the call,
+        for a call AIMD makes itself rather than one the model asked for.
+        """
+        cid = f"T{len(outcome.tool_calls) + 1}"
+        t1 = self._clock()
+        if len(outcome.tool_calls) >= MAX_TOOL_CALLS:
+            entry = {"name": name, "arguments": arguments,
+                     "category": None, "error": "tool call budget for this investigation is spent"}
+        else:
+            entry = agent_tools.execute(ctx, name, arguments)
+        # ``step`` groups the calls the model chose together: the plan, as executed.
+        entry = {"id": cid, "provider_call_id": provider_call_id, "step": step, **entry,
+                 "latency_ms": int((self._clock() - t1) * 1000)}
+        outcome.tool_calls.append(entry)
+        payload = {"tool_call_id": cid, "tool": entry["name"], "category": entry["category"]}
+        payload.update({"error": entry["error"]} if "error" in entry else {"result": entry["result"]})
+        content = agent_tools.serialise(payload)
+        results[cid] = content
+        if announce:
+            messages.append({
+                "role": "assistant", "content": None,
+                "tool_calls": [{"id": provider_call_id, "type": "function",
+                                "function": {"name": name, "arguments": arguments}}],
+            })
+        messages.append({"role": "tool", "tool_call_id": provider_call_id, "content": content})
+
+    @staticmethod
+    def _finish_grounding(final: str, results: dict, outcome: InvestigationOutcome) -> None:
         grounded = ground(final, results)
         outcome.summary = grounded.text
         outcome.citations = grounded.citations

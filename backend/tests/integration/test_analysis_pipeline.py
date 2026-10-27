@@ -169,3 +169,16 @@ def test_full_pipeline_audio(tmp_path):
     assert get_data["media_type"] == "audio"
     _assert_stage_records(analysis_id)
 
+
+
+def test_the_written_report_states_the_final_status():
+    """The status was set after the report was written, so every report said PROCESSING."""
+    media_id = client.post(
+        "/api/v1/media/upload",
+        files={"file": ("status.jpg", _make_test_image(), "image/jpeg")},
+    ).json()["media_id"]
+    analysis = client.post("/api/v1/analysis/", json={"media_id": media_id}).json()
+
+    md = client.get(f"/api/v1/analysis/{analysis['analysis_id']}/report", params={"format": "md"}).text
+    assert f"- **Analysis Status:** `{analysis['status']}`" in md
+    assert "PROCESSING" not in md and "Investigation Status" not in md

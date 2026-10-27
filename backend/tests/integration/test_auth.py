@@ -418,3 +418,21 @@ def test_signup_is_audited():
     assert created[0].actor == "audited@example.test"
     assert created[0].details["via"] == "signup"
     assert "password" not in str(created[0].details).lower()
+
+
+def test_login_accepts_the_field_signup_uses():
+    """Signup takes ``email``; login took only ``username`` for the same value."""
+    for body in ({"email": "case_analyst", "password": ANALYST_PASSWORD},
+                 {"username": "CASE_ANALYST", "password": ANALYST_PASSWORD},
+                 {"username": "case_analyst", "email": "case_analyst", "password": ANALYST_PASSWORD}):
+        r = client.post("/api/v1/auth/login", json=body)
+        assert r.status_code == 200, (body, r.text)
+        assert r.json()["username"] == "case_analyst"
+
+
+def test_login_needs_one_account_name():
+    missing = client.post("/api/v1/auth/login", json={"password": ANALYST_PASSWORD})
+    assert missing.status_code == 422
+    both = client.post("/api/v1/auth/login", json={
+        "username": "case_analyst", "email": "someone_else", "password": ANALYST_PASSWORD})
+    assert both.status_code == 422

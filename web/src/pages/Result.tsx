@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { deleteMedia, postJson } from "../api";
 import { AvailabilityMark, DeleteControl, ErrorBlock, ExecutionPill, Hash, Skeleton, TitleRow } from "../components/bits";
@@ -66,6 +66,8 @@ export function Result() {
   const [rerunning, setRerunning] = useState(false);
   const [rerunError, setRerunError] = useState<string | null>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
+  // Bumped when an investigation finishes, so the report is fetched again.
+  const [reportKey, setReportKey] = useState(0);
 
   const d = a.data;
   const byId = useMemo(() => new Map((d?.observations ?? []).map((o) => [o.id, o])), [d]);
@@ -79,6 +81,7 @@ export function Result() {
   // Only a finished run has evidence to show; a failed or unfinished one would
   // fill every panel with "Unavailable".
   const finished = d != null && !failed && !running;
+  const bumpReport = useCallback(() => setReportKey((k) => k + 1), []);
 
   // Re-read while the run is still going.
   const { reload } = a;
@@ -194,8 +197,8 @@ export function Result() {
           )}
           <ContentCredentialsCard d={d} />
           <SourcesCard d={d} />
-          <InvestigationCard analysisId={d.analysis_id} finished />
-          <ReportCard analysisId={d.analysis_id} />
+          <InvestigationCard analysisId={d.analysis_id} finished onFinished={bumpReport} />
+          <ReportCard key={reportKey} analysisId={d.analysis_id} />
         </>
       )}
 

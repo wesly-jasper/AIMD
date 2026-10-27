@@ -31,6 +31,7 @@ from app.services.provenance.timeline import build_timeline
 from app.schemas.detection import AnalysisRequest, AnalysisResponse, InvestigationRequest
 from app.services.audit.audit_log import AuditAction, record_event
 from app.services.evidence.report_html import render_report_html
+from app.services.evidence.report_investigation import investigation_json, investigation_markdown
 from app.services.orchestration.analysis_pipeline import AnalysisPipeline
 
 logger = logging.getLogger(__name__)
@@ -462,9 +463,10 @@ def get_report(
     current_user: User = Depends(get_current_user),
 ):
     """
-    The report written when the analysis finished. HTML is rendered from the
-    stored Markdown with everything escaped; its print stylesheet makes it the
-    PDF form ("Save as PDF").
+    The report written when the analysis finished, with the latest investigation
+    appended (see ``report_investigation``). HTML is rendered from the Markdown
+    with everything escaped; its print stylesheet makes it the PDF form ("Save
+    as PDF").
     """
     analysis = repo.get_owned_analysis(db, analysis_id, current_user.username)
     if not analysis:
@@ -475,17 +477,23 @@ def get_report(
 
     filename = f"aimd-report-{analysis_id}.{format}"
     disposition = {"Content-Disposition": f'inline; filename="{filename}"'}
+    # Added on every read: investigations run after the report was written.
+    investigation = repo.get_latest_investigation(db, analysis_id)
     if format == "json":
         if report.json_report is None:
             raise HTTPException(status_code=404, detail="This report has no JSON form")
-        return JSONResponse(report.json_report, headers=disposition)
+        return JSONResponse(
+            {**report.json_report, "investigation": investigation_json(investigation)},
+            headers=disposition,
+        )
     if report.markdown_report is None:
         raise HTTPException(status_code=404, detail="This report has no Markdown form")
+    markdown = report.markdown_report + investigation_markdown(investigation)
     if format == "md":
-        return PlainTextResponse(report.markdown_report, media_type="text/markdown; charset=utf-8",
+        return PlainTextResponse(markdown, media_type="text/markdown; charset=utf-8",
                                  headers=disposition)
     return HTMLResponse(
-        render_report_html(report.markdown_report, f"AIMD report {analysis_id}"),
+        render_report_html(markdown, f"AIMD report {analysis_id}"),
         headers={
             **disposition,
             # The document is static: no script, no fetch, nothing but its own styles.

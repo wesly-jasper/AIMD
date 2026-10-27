@@ -51,6 +51,7 @@ os.environ["LOGS_DIR"] = str(_TEST_ROOT / "logs")
 os.environ["GOOGLE_VISION_API_KEY"] = ""
 os.environ["TINEYE_API_KEY"] = ""
 os.environ["SOURCE_WAYBACK_ENABLED"] = "false"
+os.environ["SOURCE_COMMONS_LIVE_ENABLED"] = "false"
 # The investigation agent's key is moved aside, not lost: the one live smoke
 # test (marked ``live``) reads it from AIMD_LIVE_NEBIUS_API_KEY and skips
 # without it. Everything else sees no key and must answer UNAVAILABLE.

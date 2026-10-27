@@ -227,31 +227,26 @@ class FaceRegionAnalyzer(BaseDetector):
                     },
                 )
 
-            # Overall confidence
+            # A weighted mean of hand-tuned per-region heuristics, with weights
+            # chosen by judgement rather than fitted. It used to be compared with
+            # 0.55 and reported as manipulation. Measured on Commons portraits,
+            # two genuine official portraits scored 0.52-0.53 and four of five
+            # AI-generated faces scored lower (0.38-0.52): the score does not
+            # separate them, so it supports no determination either way. The
+            # landmarks, per-region scores and face scores are kept for review.
             max_conf = max(face_scores) if face_scores else 0.0
-            manipulation_detected = max_conf >= 0.55
-
-            return DetectionResult(
-                detector=self.detector_id,
-                detector_version=self.version,
+            return self.inconclusive(
+                "Uncalibrated heuristic: facial regions were analysed; their scores "
+                "are kept for examiner review and do not support a determination.",
                 media_type="image",
-                manipulation_detected=manipulation_detected,
-                confidence=round(max_conf, 4),
-                manipulation_type=self.manipulation_type,
-                availability=DetectorAvailability.AVAILABLE,
-                execution_status=DetectorExecutionStatus.COMPLETED,
-                # A weighted mean of hand-tuned per-region heuristics. The weights
-                # were chosen by judgement, not fitted, so this is ordinal
-                # severity and not a probability that the face is synthetic.
-                score_semantics=ScoreSemantics.HEURISTIC_SEVERITY,
                 regions=all_regions,
                 metadata={
                     "status": "active_face_region_analysis",
                     "faces_detected": len(faces),
                     "regions_analyzed": len(all_regions),
                     "face_scores": [round(s, 3) for s in face_scores],
+                    "heuristic_max_score": round(max_conf, 4),
                     "region_weights": self.region_weights,
-                    "note": "OBSERVATION: Per-facial-region analysis complete. High confidence in specific regions indicates localized manipulation.",
                 },
             )
 

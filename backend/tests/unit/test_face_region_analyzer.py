@@ -247,7 +247,9 @@ def test_real_mediapipe_landmarker_detects_public_sample_when_configured():
         result = analyzer.detect(sample_path)
         assert result.metadata["faces_detected"] == 1
         assert result.metadata["regions_analyzed"] > 0
-        assert result.assessment in (Assessment.CLEAN, Assessment.SUSPICIOUS)
+        # Uncalibrated: the face is analysed and its scores kept, never a verdict.
+        assert result.assessment == Assessment.INCONCLUSIVE
+        assert result.metadata["face_scores"] and result.regions
         assert not result.metadata.get("reason")
     finally:
         analyzer.close()

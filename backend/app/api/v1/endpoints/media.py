@@ -212,6 +212,9 @@ def download_media(
         str(path),
         media_type=media.content_type or "application/octet-stream",
         filename=media.original_filename,
+        # Uploads from before content sniffing hold the client's declared type;
+        # never let a browser second-guess it into something renderable.
+        headers={"X-Content-Type-Options": "nosniff"},
     )
 
 

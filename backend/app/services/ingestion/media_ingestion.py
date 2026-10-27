@@ -29,16 +29,6 @@ from app.services.preprocessing.keyframe_selector import KeyframeSelector
 
 logger = logging.getLogger(__name__)
 
-# File magic bytes for validation (subset of common media types)
-_MAGIC_SIGNATURES: dict[str, bytes] = {
-    "image/jpeg": bytes([0xFF, 0xD8, 0xFF]),
-    "image/png": bytes([0x89, 0x50, 0x4E, 0x47]),
-    "image/gif": b"GIF",
-    "image/webp": None,  # RIFF....WEBP -- checked separately
-    "video/mp4": None,   # ftyp at offset 4 -- checked separately
-}
-
-
 def _sanitize_filename(filename: str) -> str:
     """Remove path components and dangerous characters from a filename."""
     # Strip directory components
@@ -51,39 +41,80 @@ def _sanitize_filename(filename: str) -> str:
     return name[:200]  # Maximum length
 
 
-def _detect_media_type(data: bytes, content_type: str) -> str:
-    """Determine media_type (image/video/audio) from file content."""
-    # Check magic bytes
-    if data[:3] == bytes([0xFF, 0xD8, 0xFF]):
-        return "image"
-    if data[:8] == bytes([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]):
-        return "image"
-    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
-        return "image"
-    if data[:4] in (b"\x00\x00\x00\x18", b"\x00\x00\x00\x1c", b"\x00\x00\x00\x20"):
-        # MP4 ftyp box -- likely video
-        if data[4:8] == b"ftyp":
-            return "video"
-    # AVI
-    if data[:4] == b"RIFF" and data[8:12] == b"AVI ":
-        return "video"
-    # WAV
-    if data[:4] == b"RIFF" and data[8:12] == b"WAVE":
-        return "audio"
-    # MP3 ID3
+UNSUPPORTED_CONTENT = (
+    "The file's content is not a supported image, video or audio format "
+    "(JPEG, PNG, WebP, TIFF, MP4, MOV, AVI, MKV, WAV, MP3, AAC or M4A)."
+)
+
+
+def _sniff(data: bytes) -> tuple[str, str, str] | None:
+    """
+    ``(MIME type, media type, extension)`` from the file's own bytes, or None.
+
+    The bytes are the only authority. This used to fall back to the declared
+    Content-Type when no signature matched, so an HTML page or a text file sent
+    as ``image/jpeg`` was stored and analysed as an image, while a real PNG sent
+    as ``application/octet-stream`` was refused.
+    """
+    if data[:3] == b"\xff\xd8\xff":
+        return "image/jpeg", "image", ".jpg"
+    if data[:8] == b"\x89PNG\r\n\x1a\n":
+        return "image/png", "image", ".png"
+    if data[:4] in (b"II*\x00", b"MM\x00*"):
+        return "image/tiff", "image", ".tiff"
+    if data[:4] == b"RIFF":
+        kind = data[8:12]
+        if kind == b"WEBP":
+            return "image/webp", "image", ".webp"
+        if kind == b"AVI ":
+            return "video/x-msvideo", "video", ".avi"
+        if kind == b"WAVE":
+            return "audio/wav", "audio", ".wav"
+    if data[4:8] == b"ftyp":  # ISO base media; the box size at 0..4 varies
+        brand = data[8:12]
+        if brand == b"qt  ":
+            return "video/quicktime", "video", ".mov"
+        if brand in (b"M4A ", b"M4B "):
+            return "audio/mp4", "audio", ".m4a"
+        return "video/mp4", "video", ".mp4"
+    if data[:4] == b"\x1aE\xdf\xa3":
+        return "video/x-matroska", "video", ".mkv"
     if data[:3] == b"ID3":
-        return "audio"
+        return "audio/mpeg", "audio", ".mp3"
+    if len(data) > 1 and data[0] == 0xFF and data[1] & 0xE0 == 0xE0:
+        # MPEG audio frame sync: layer bits 00 are AAC ADTS, anything else MP3.
+        if data[1] & 0x06 == 0:
+            return "audio/aac", "audio", ".aac"
+        return "audio/mpeg", "audio", ".mp3"
+    return None
 
-    # Fall back to content-type header (least trusted)
-    if content_type:
-        if content_type.startswith("image/"):
-            return "image"
-        if content_type.startswith("video/"):
-            return "video"
-        if content_type.startswith("audio/"):
-            return "audio"
 
-    raise ValueError(f"Cannot determine media type from file content (content-type: {content_type})")
+def _check_decodes(media_type: str, data: bytes, path: Path) -> None:
+    """Refuse an image or video that has a valid signature but cannot be read."""
+    if media_type == "image":
+        import io
+
+        from PIL import Image
+
+        try:
+            with Image.open(io.BytesIO(data)) as img:
+                img.verify()
+            with Image.open(io.BytesIO(data)) as img:
+                img.load()  # verify() does not decode pixels; a truncated JPEG passes it
+        except Exception as exc:
+            raise ValueError(
+                "The image could not be decoded: it may be truncated or corrupt."
+            ) from exc
+    elif media_type == "video":
+        import cv2
+
+        cap = cv2.VideoCapture(str(path))
+        try:
+            readable = cap.isOpened() and cap.read()[0]
+        finally:
+            cap.release()
+        if not readable:
+            raise ValueError("The video could not be decoded: it may be truncated or corrupt.")
 
 
 class MediaIngestionService:
@@ -97,16 +128,9 @@ class MediaIngestionService:
         self.keyframe_selector = KeyframeSelector(settings.keyframes_dir)
 
     def validate_file(self, file: UploadFile) -> None:
-        """Validate the uploaded file against allowed types."""
+        """Checks that need no bytes. The type is decided by the content in ``ingest``."""
         if not file.filename:
             raise ValueError("Filename is missing")
-
-        allowed_types = settings.all_allowed_types
-        if file.content_type not in allowed_types:
-            raise ValueError(
-                f"Unsupported file type: {file.content_type}. "
-                f"Allowed: {', '.join(allowed_types)}"
-            )
 
     def generate_sha256(self, data: bytes) -> str:
         return hashlib.sha256(data).hexdigest()
@@ -130,7 +154,6 @@ class MediaIngestionService:
         Returns:
             Dict with media_id, sha256, file_path, metadata, and status.
         """
-        # Validate content-type header
         self.validate_file(file)
 
         # Read file contents
@@ -145,15 +168,20 @@ class MediaIngestionService:
         if len(data) == 0:
             raise ValueError("Empty file uploaded")
 
-        # Determine media type from content (magic bytes)
-        try:
-            media_type = _detect_media_type(data, file.content_type or "")
-        except ValueError as exc:
-            raise ValueError(str(exc))
+        # The type comes from the bytes, never from the declared Content-Type.
+        sniffed = _sniff(data)
+        if sniffed is None or sniffed[0] not in settings.all_allowed_types:
+            raise ValueError(UNSUPPORTED_CONTENT)
+        content_type, media_type, extension = sniffed
+        if file.content_type and file.content_type != content_type:
+            logger.info(
+                "Declared type %s differs from content %s; the content is used",
+                file.content_type, content_type,
+            )
+        if media_type == "image":
+            _check_decodes(media_type, data, Path())  # a video is checked once on disk
 
-        # Sanitize filename
         safe_name = _sanitize_filename(file.filename or "upload")
-        extension = Path(safe_name).suffix.lower() or ".bin"
 
         # Generate IDs
         media_id = str(uuid.uuid4())
@@ -163,6 +191,12 @@ class MediaIngestionService:
         self.upload_dir.mkdir(parents=True, exist_ok=True)
         file_path = self.upload_dir / stored_filename
         file_path.write_bytes(data)
+        if media_type == "video":
+            try:
+                _check_decodes(media_type, data, file_path)
+            except ValueError:
+                file_path.unlink(missing_ok=True)
+                raise
 
         # Compute SHA-256
         sha256 = self.generate_sha256(data)
@@ -217,7 +251,7 @@ class MediaIngestionService:
             "original_filename": safe_name,
             "stored_filename": stored_filename,
             "file_path": str(file_path),
-            "content_type": file.content_type,
+            "content_type": content_type,
             "media_type": media_type,
             "size_bytes": len(data),
             "sha256": sha256,
@@ -237,7 +271,7 @@ class MediaIngestionService:
                     "original_filename": safe_name,
                     "stored_filename": stored_filename,
                     "file_path": str(file_path),
-                    "content_type": file.content_type or "application/octet-stream",
+                    "content_type": content_type,
                     "media_type": media_type,
                     "size_bytes": len(data),
                     "sha256": sha256,

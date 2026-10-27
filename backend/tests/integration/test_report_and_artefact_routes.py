@@ -161,3 +161,57 @@ def test_report_guards():
     theirs = seed_analysis(owner=OTHER)
     _with_report(theirs)
     assert client.get(f"/api/v1/analysis/{theirs}/report").status_code == 404
+
+
+# ── The investigation in the served report ────────────────────────────────────
+
+def _with_investigation(analysis_id: str, summary: str, flags=None) -> None:
+    with SessionLocal() as db:
+        inv = repo.create_investigation(db, {"analysis_id": analysis_id, "requested_by": "pytest"})
+        repo.update_investigation(
+            db, inv.id, status="COMPLETED", model="nvidia/nemotron-test",
+            summary=summary, flags=flags or [],
+            tool_calls=[{"id": "T1", "name": "get_analysis_overview", "category": "OBSERVATION",
+                         "arguments": {}, "result": {"assessment": "INCONCLUSIVE"}, "latency_ms": 5}],
+        )
+
+
+def test_no_investigation_leaves_the_report_as_written():
+    analysis_id = seed_analysis()
+    _with_report(analysis_id)
+    base = f"/api/v1/analysis/{analysis_id}/report"
+    assert client.get(base).json()["investigation"] is None
+    assert client.get(base, params={"format": "md"}).text == MARKDOWN
+
+
+def test_a_completed_investigation_is_in_every_format_as_inference():
+    analysis_id = seed_analysis()
+    _with_report(analysis_id)
+    _with_investigation(analysis_id, "The forgery model reported nothing [T1].\n<b>not markup</b>",
+                        flags=[{"type": "unsupported_number", "value": "256", "sentence": "x"}])
+    base = f"/api/v1/analysis/{analysis_id}/report"
+
+    inv = client.get(base).json()["investigation"]
+    assert inv["status"] == "COMPLETED" and inv["summary"]["category"] == "INFERENCE"
+    assert inv["grounded"] is False
+    assert "result" not in inv["tool_calls"][0]  # the trace's results stay out of the report
+
+    md = client.get(base, params={"format": "md"}).text
+    assert md.startswith(MARKDOWN)
+    assert "## Investigation [INFERENCE]" in md and "nvidia/nemotron-test" in md
+    assert "1 unsupported claim(s) removed: a number no tool returned" in md
+    assert "The forgery model reported nothing [T1]." in md
+    assert "- `T1` `get_analysis_overview` -- OBSERVATION" in md
+
+    page = client.get(base, params={"format": "html"}).text
+    assert "<h2>Investigation [INFERENCE]</h2>" in page
+    assert "<b>" not in page and "&lt;b&gt;not markup&lt;/b&gt;" in page
+
+
+def test_an_unfinished_investigation_is_named_without_a_summary():
+    analysis_id = seed_analysis()
+    _with_report(analysis_id)
+    with SessionLocal() as db:
+        repo.create_investigation(db, {"analysis_id": analysis_id, "requested_by": "pytest"})
+    md = client.get(f"/api/v1/analysis/{analysis_id}/report", params={"format": "md"}).text
+    assert "The latest investigation of this analysis is still running" in md

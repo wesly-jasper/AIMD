@@ -41,6 +41,11 @@ open-clip-torch>=2.24,<4     # CLIP ViT-L/14: UnivFD backbone + similarity embed
 timm>=0.9                    # TruFor's SegFormer encoder (code fetched by scripts/fetch_models.py)
 facenet-pytorch==2.5.3       # MTCNN face detection (2.6 pins torch<2.3 and numpy<2)
 mediapipe>=0.10.14,<0.11     # face landmarks
+# mediapipe declares opencv-contrib-python (unpinned, so 5.x), which installs a
+# second cv2 over the pinned one above. Install it without its dependencies:
+#   pip install "mediapipe>=0.10.14,<0.11" --no-deps && pip install absl-py sounddevice
+# Without mediapipe, FaceRegionAnalyzer is UNAVAILABLE and no image analysis can
+# report full coverage, so every result is INCONCLUSIVE.
 ultralytics>=8.1             # YOLOv8 baseline object detector
 pyarrow>=15                  # reads the CocoGlide parquet (scripts/fetch_models.py --cocoglide-parquet)
 

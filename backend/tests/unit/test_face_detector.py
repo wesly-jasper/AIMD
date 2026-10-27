@@ -184,3 +184,34 @@ def test_mtcnn_runtime_crash_is_failed_not_a_completed_analysis(tmp_path, monkey
     assert result.execution_status == DetectorExecutionStatus.FAILED
     assert "RuntimeError" in result.status_reason
     assert result.produced_observations is False
+
+
+def test_a_located_face_is_kept_for_review_but_never_a_verdict(tmp_path):
+    """
+    The face score is hand-thresholded edge and texture ratios. Reported as
+    SUSPICIOUS it flagged a genuine camera photo in the end-to-end run, so, like
+    the other uncalibrated heuristics, it is INCONCLUSIVE: the face regions and
+    the score are kept for an examiner and do not vote on editing.
+    """
+    class OneFace:
+        def empty(self):
+            return False
+
+        def detectMultiScale(self, *args, **kwargs):
+            return np.array([[8, 8, 48, 48]])
+
+    rng = np.random.default_rng(0)
+    img_file = tmp_path / "face.jpg"
+    Image.fromarray(rng.integers(0, 255, (64, 64, 3), dtype=np.uint8)).save(img_file)
+    detector = BaselineFaceDetector()
+    detector.face_cascade = OneFace()
+
+    result = detector.detect(str(img_file))
+
+    assert result.execution_status == DetectorExecutionStatus.INCONCLUSIVE
+    assert result.manipulation_detected is False
+    assert result.score_semantics == ScoreSemantics.NOT_APPLICABLE
+    assert [r.bbox for r in result.regions] == [[8.0, 8.0, 48.0, 48.0]]
+    assert result.metadata["faces_detected"] == 1
+    assert 0.0 < result.metadata["heuristic_max_score"] <= 0.95
+    assert "Uncalibrated heuristic" in result.status_reason

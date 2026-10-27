@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { ApiError, getJson, postJson } from "../api";
 import { dateTime, duration } from "../format";
 import type { Investigation, ToolCall } from "../types";
@@ -72,7 +72,7 @@ function Plan({ calls }: { calls: ToolCall[] }) {
     <ol className="plan">
       {steps.map((s) => (
         <li key={s}>
-          <span className="plan-step num">Step {s}</span>
+          <span className="plan-step num">{s === 0 ? "First" : `Step ${s}`}</span>
           <span>{calls.filter((c) => c.step === s).map((c) => TOOL[c.name] ?? c.name).join(" · ")}</span>
         </li>
       ))}
@@ -111,7 +111,9 @@ function Trace({ calls, open, focused, setOpen }: { calls: ToolCall[]; open: Set
  * tools and writes a summary in which every sentence cites the calls it rests on.
  * It never changes the analysis; its summary is an interpretation, labelled so.
  */
-export function InvestigationCard({ analysisId, finished }: { analysisId: string; finished: boolean }) {
+export function InvestigationCard({ analysisId, finished, onFinished }: {
+  analysisId: string; finished: boolean; onFinished?: () => void;
+}) {
   const [inv, setInv] = useState<Investigation | null>(null);
   const [loadError, setLoadError] = useState<Error | null>(null);
   const [loaded, setLoaded] = useState(false);
@@ -133,6 +135,13 @@ export function InvestigationCard({ analysisId, finished }: { analysisId: string
       .finally(() => { if (live) setLoaded(true); });
     return () => { live = false; };
   }, [analysisId, tick]);
+
+  // A run that was RUNNING has finished: the served report now includes it.
+  const lastStatus = useRef<string | undefined>(undefined);
+  useEffect(() => {
+    if (lastStatus.current === "RUNNING" && inv && inv.status !== "RUNNING") onFinished?.();
+    lastStatus.current = inv?.status;
+  }, [inv, onFinished]);
 
   // Poll while the agent works; it runs in the background on the server.
   useEffect(() => {
@@ -247,7 +256,7 @@ export function InvestigationCard({ analysisId, finished }: { analysisId: string
             <div className="inv-cols">
               <div>
                 <h3>Plan</h3>
-                <p className="sub">The tools the agent chose, in the order it called them.</p>
+                <p className="sub">The tools the agent chose, in the order it called them. A URL you supply is checked first, by AIMD itself.</p>
                 <Plan calls={inv.tool_calls} />
               </div>
               <div>

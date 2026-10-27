@@ -10,9 +10,10 @@ come solely from the bootstrap environment variables (app.core.auth).
 """
 import re
 from datetime import timedelta
+from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 from sqlalchemy.orm import Session
 
 from app.core.auth import (
@@ -43,8 +44,23 @@ class TokenResponse(BaseModel):
 
 
 class LoginRequest(BaseModel):
-    username: str = Field(min_length=1, max_length=254)
+    # Signup names the account ``email``; login said ``username`` for the same
+    # value. Both are accepted, so the pair can be used symmetrically.
+    username: Optional[str] = Field(default=None, min_length=1, max_length=254)
+    email: Optional[str] = Field(default=None, min_length=1, max_length=254)
     password: str = Field(min_length=1, max_length=256)
+
+    @model_validator(mode="after")
+    def _account(self) -> "LoginRequest":
+        if not (self.username or self.email):
+            raise ValueError("Enter your email address")
+        if self.username and self.email and self.username.strip().lower() != self.email.strip().lower():
+            raise ValueError("username and email name different accounts")
+        return self
+
+    @property
+    def account(self) -> str:
+        return (self.email or self.username or "").strip().lower()
 
 
 class SignupRequest(BaseModel):
@@ -79,7 +95,7 @@ def _token_for(record: dict) -> TokenResponse:
 def login(request: Request, credentials: LoginRequest):
     # ``request`` is the HTTP request, which slowapi requires by that name to key
     # the limit; the body is ``credentials``. Emails are stored lower-cased.
-    record = user_store.authenticate(credentials.username.strip().lower(), credentials.password)
+    record = user_store.authenticate(credentials.account, credentials.password)
     if record is None:
         # One message for a wrong password, an unknown account and a deactivated
         # one: distinguishing them would confirm which accounts exist.

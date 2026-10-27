@@ -54,8 +54,11 @@ export function BranchCards({ d }: { d: AnalysisDetail }) {
   const ran = manip.filter((x) => x.execution_status === "COMPLETED" || x.execution_status === "INCONCLUSIVE");
   const missing = manip.filter((x) => !ran.includes(x));
   const detail = d.assessment_detail;
+  // coverage_gaps can hold detection ids; those checks are listed by name from
+  // ``missing`` below, so an id is never shown as text.
+  const ids = new Set(d.detections.map((x) => x.id));
   const manipLimits = [
-    ...(detail?.coverage_gaps ?? []),
+    ...(detail?.coverage_gaps ?? []).filter((g) => !ids.has(g)),
     ...missing.map((x) => `${checkName(x.detector)}: ${unavailableReason(x)}`),
   ];
 
@@ -327,9 +330,13 @@ const VERIFICATION: Record<string, { label: string; tone: string; what: string }
   NO_MATCH: { label: "Not a match", tone: "hollow", what: "Compared and rejected" },
 };
 
+// Keyed by connector (search strip) and by hit provider (source cards).
 const PROVIDER: Record<string, string> = {
-  wikimedia_commons: "Wikimedia Commons",
+  // A local corpus of pre-fetched Commons images, not a search of Commons.
+  wikimedia_commons: "Commons reference set",
+  wikimedia_commons_live: "Wikimedia Commons (exact copies)",
   wayback: "Internet Archive",
+  url_verification: "URL you supplied",
   user_supplied_url: "URL you supplied",
 };
 

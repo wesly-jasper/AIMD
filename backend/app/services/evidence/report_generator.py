@@ -54,7 +54,7 @@ class ReportGenerator:
             f"- **Forensic Assessment:** **`{verdict}`**",
             f"- **Evidence Strength:** `{evidence_strength}` "
             "(ordinal support for the assessment -- not a probability)",
-            f"- **Investigation Status:** `{case.get('analysis_status', 'COMPLETED')}`",
+            f"- **Analysis Status:** `{case.get('analysis_status', 'COMPLETED')}`",
             f"- **Analysis ID:** `{case.get('analysis_id')}`",
             "",
         ]

@@ -132,6 +132,8 @@ class Settings(BaseSettings):
     wikimedia_contact: Optional[str] = None
     # Search the indexed corpus for each image upload (no network at analysis time).
     source_wikimedia_enabled: bool = True
+    # Ask Commons live for a byte-identical copy, by SHA-1 (needs wikimedia_contact).
+    source_commons_live_enabled: bool = True
     # Fetch and check the URL a user supplies with an analysis (SSRF-guarded).
     source_url_verification_enabled: bool = True
     # Look up verified sources in the Wayback Machine (network at analysis time).
