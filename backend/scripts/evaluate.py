@@ -248,6 +248,9 @@ def cmd_calibrate(args) -> int:
             for r in records
             if r["targets"].get(branch) is not None
             and r["detectors"].get(detector, {}).get("raw_score") is not None
+            # An inconclusive result is not an observation, and fusion ignores
+            # it; fitting on it would credit the detector with silence it never had.
+            and r["detectors"][detector].get("execution_status", "COMPLETED") == "COMPLETED"
         ]
         versions = {v for _, _, v in rows}
         if len(versions) != 1:

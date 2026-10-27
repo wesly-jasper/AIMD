@@ -277,18 +277,45 @@ Version 2 matches against the two nearest *other* keypoints, orients pairs consi
 - **AI inpainting is not the AI-generation branch's job.** The AI-generation detectors answer a different question ("was the whole image generated?"), and partly generated images are excluded from that branch by design (`EVALUATION.md` §1). An inpainting-specific localiser is the next candidate.
 - **TruFor stability:** the out-of-memory recovery (§4.1) held in every run since, with 0 run errors in 1,004 file-runs.
 
+### 4.5 Evidence fusion, Phase 4 (2026-10-27)
+
+**What it is.** Each analysis now carries an `evidence_fusion` record beside the verdicts. The verdict rules are unchanged. For each branch, manipulation and AI generation, kept separate, the record answers one question: how much more probable are these detector outputs if the answer is yes than if it is no? That is a likelihood ratio (LR). It is reported as a range with a verbal strength, never as a "probability of manipulation", because the prior (how common edited files are among uploads) is unknown.
+
+- **Calibrated detectors only.** A detector gives a number only with a calibration fitted for its exact version. Otherwise it is listed with its direction and no number.
+- **Capped by the data.** An LR is capped at what the validation set could show: with n negatives, at most n + 1.
+- **No double counting.** Within a signal family only the strongest detector counts.
+- **A range across families.** It runs from fully dependent (only the strongest family counts) to independent (log-LRs add). The verbal strength comes from the weaker end, on the ENFSI scale: < 10 limited, 10–100 moderate, 100–1,000 moderately strong.
+- **Conflicts and advisory detectors.** Detectors pointing in opposite directions are listed as conflicts. Advisory detectors (UnivFD) are shown but do not count.
+- **Copy-move by flag rate.** Copy-move is calibrated by flag rate, since its evidence is whether it fired: LR ≈ 11 when it fires, ≈ 0.93 when it does not.
+
+**Measured.** Calibrations were fitted on **validation** (TruFor 72+/72−, copy-move 69+/68−, B-Free 27+/96−) and scored on **test**. Cllr is the log-LR cost: 0 is perfect, and 1 is a system that always says LR = 1.
+
+| Test split | Cllr | Positives graded SUPPORTS | Negatives graded SUPPORTS | Negatives graded AGAINST | Misleading by ≥ 10× (positives / negatives) |
+|---|---|---|---|---|---|
+| Manipulation (138+/138−) | 0.81 | 36 (26%) | 4 (3%) | 9 (7%) | 0.7% / 2.9% |
+| AI generation (55+/174−) | 0.61 | 24 (44%) | 1 (0.6%) | 10 (6%) | 1.8% / 0.6% |
+
+- **Mostly "limited".** That is the point: 72% of manipulated and 91% of genuine test files get LIMITED instead of a forced yes or no.
+- **Never above "moderate".** The validation sets are small, and the caps are log10(73) and log10(97). More validation data, not a better model, is what lifts that ceiling.
+- **Every number holds only for files like the validation data.** The card and the report say so.
+- **Checked end to end.** The API, the evidence package, the Markdown/HTML report and the result page all carry the record. A copy-move test file read "Supports, LR 47 to 505, moderate" (TruFor 47, copy-move 11). A missed AI image read "Limited" on both branches, where the verdict had to choose.
+
+**Turning it on.** Set `FUSION_CALIBRATION_PATH` to a calibration file (`EVALUATION.md` §6.1). Without it every branch reads NOT_ASSESSED, with directions only.
+
 ## 5. What to rely on, and what not to
 
 **Rely on:**
 - A **SUSPICIOUS** verdict with a TruFor region on a normal-resolution photo. About 9 in 10 such flags were real edits in these sets, and the region is accurate.
 - **VERIFIED_MATCH** as "same picture". Never between unrelated images here.
 - **Determinism:** the same file gives the same answer.
+- **Evidence strength graded SUPPORTS or AGAINST** (§4.5), for files like the validation data. A ratio of 10 or more pointed the wrong way for at most 3% of test files.
 
 **Don't rely on:**
 - **"No significant anomalies"** as evidence of authenticity. It missed 20% of controlled edits, 66% of generative inpaintings and 78% of recompressed ones, which is what the product wording already says.
 - **"AI generation not indicated".** UnivFD missed 90% of AI images. B-Free (§4.3) misses 31% overall, and about 70% of GPT-image and Flux images.
 - **"Possible AI generation" on a photo, from UnivFD.** It is more often a sign of editing (§3.3). B-Free flagged 2 of 36 edited photos (§4.3), and UnivFD no longer votes when B-Free has a score.
 - **Any video verdict.** None is ever reached.
+- **"Limited" as a finding either way.** It means the detectors barely discriminate on this file.
 - **Multi-detector corroboration, except for copy-moves.** Until §4.4 no manipulation detector other than TruFor fired in 502 images. The fixed copy-move detector now corroborates TruFor on clones, and nothing else does yet.
 - **VERIFIED_MATCH as proof that a file is unedited** (§3.5).
 

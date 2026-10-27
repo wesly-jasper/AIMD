@@ -146,6 +146,21 @@ python scripts/evaluate.py compare runs/baseline runs/calibrated --split test
 
 **What the probability means.** It is calibrated to the validation set's class balance (`prior` in the record). It answers "how often a file with this score was positive in a set with this mix", not a universal likelihood.
 
+### 6.1 Evidence fusion
+
+```
+python scripts/evaluate.py calibrate runs/<val-run> --split val --out models/fusion-calibration.json
+FUSION_CALIBRATION_PATH=models/fusion-calibration.json   # quantifies evidence; detector flags unchanged
+```
+
+`calibrate` fits the copy-move detector by **flag rate**, P(fires | edited) against P(fires | genuine), with add-one-half smoothing. Its score is 0 on almost every file, and a sigmoid through that is flat. Every other detector is fitted with Platt scaling.
+
+**Two settings:**
+- `FUSION_CALIBRATION_PATH`: the file is used only to turn detector outputs into likelihood ratios for `evidence_fusion`.
+- `CALIBRATION_PATH`: also changes detector flags. Fusion falls back to it when `FUSION_CALIBRATION_PATH` is unset.
+
+**How to judge fusion.** Judge on test or holdout with **Cllr** (log-LR cost; below 1 means the ratios carry information) and the rate of ratios of 10× or more pointing the wrong way. Results for the current calibrations are in `RELIABILITY_REPORT.md` §4.5.
+
 ## 7. Targets
 
 Proposed targets for release, not current results. See `RELIABILITY_REPORT.md` for the current baseline.
