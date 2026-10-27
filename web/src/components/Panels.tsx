@@ -185,7 +185,7 @@ const FUSION_LABEL: Record<FusionStatus, string> = {
 
 function lrText(v: number): string {
   const x = 10 ** Math.abs(v);
-  return x >= 100 ? Math.round(x).toLocaleString() : x.toPrecision(2);
+  return (v < 0 ? "1/" : "") + (x >= 100 ? Math.round(x).toLocaleString() : x.toPrecision(2));
 }
 
 function FusionPart({ title, part }: { title: string; part: FusionBranch }) {
@@ -200,7 +200,8 @@ function FusionPart({ title, part }: { title: string; part: FusionBranch }) {
       </div>
       {range && (
         <p className="num">
-          Likelihood ratio {range[0] < 0 ? "1/" : ""}{lrText(range[0])} to {range[1] < 0 ? "1/" : ""}{lrText(range[1])}
+          Likelihood ratio {lrText(range[0])}
+          {lrText(range[1]) !== lrText(range[0]) ? ` to ${lrText(range[1])}` : ""}
           {part.strength ? ` · ${part.strength}` : ""}
         </p>
       )}
@@ -219,7 +220,7 @@ function FusionPart({ title, part }: { title: string; part: FusionBranch }) {
         {part.contributions.filter((c) => c.status === "observed").map((c) => (
           <li key={c.detector}>
             <span>{checkName(c.detector)}</span>
-            <span className="num">{c.log10_lr != null ? `LR ${c.log10_lr < 0 ? "1/" : ""}${lrText(c.log10_lr)}${c.capped ? " (capped)" : ""}` : "—"}</span>
+            <span className="num">{c.log10_lr != null ? `LR ${lrText(c.log10_lr)}${c.capped ? " (capped)" : ""}` : "—"}</span>
             <span className="sub-inline">
               {direction(c)}
               {c.calibrated === false ? " · not calibrated, direction only" : ""}
