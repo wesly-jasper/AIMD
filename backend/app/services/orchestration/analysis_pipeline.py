@@ -74,6 +74,13 @@ _CONFIG_SNAPSHOT_KEYS = (
     "trufor_tile_overlap",
     "univfd_enabled",
     "univfd_threshold",
+    "bfree_enabled",
+    "bfree_threshold",
+    "ai_generation_advisory_detectors",
+    "calibration_path",
+    "video_keyframe_verdicts_enabled",
+    "detector_timeout_seconds",
+    "detector_retry_on_memory_error",
     "object_detection_enabled",
     "similarity_embedding_enabled",
     "similarity_phash_max_distance",
@@ -1316,7 +1323,9 @@ class AnalysisPipeline:
         snapshot = {}
         for key in _CONFIG_SNAPSHOT_KEYS:
             value = getattr(settings, key, None)
-            if not isinstance(value, (bool, int, float, str, type(None))):
+            if isinstance(value, (list, tuple)):
+                value = [str(v) for v in value]
+            elif not isinstance(value, (bool, int, float, str, type(None))):
                 value = str(value)
             snapshot[key] = value
         return snapshot

@@ -393,3 +393,13 @@ def test_a_degenerate_fit_is_refused():
         # Scores that run against the labels: no monotone calibration exists.
         calibration.fit("D", "v", [0.9] * 50 + [0.1] * 50, [False] * 50 + [True] * 50,
                         target_fpr=0.05, fitted_on={})
+
+
+def test_run_config_records_the_ai_branch_settings():
+    """A run must say which AI detectors voted, or its numbers cannot be reproduced."""
+    from app.services.orchestration.analysis_pipeline import AnalysisPipeline
+
+    snapshot = AnalysisPipeline._config_snapshot()
+    assert {"bfree_enabled", "bfree_threshold", "calibration_path",
+            "video_keyframe_verdicts_enabled"} <= set(snapshot)
+    assert isinstance(snapshot["ai_generation_advisory_detectors"], list)
