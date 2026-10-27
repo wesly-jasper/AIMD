@@ -47,6 +47,10 @@ LIMITATIONS: List[str] = [
     "from that family can be missed.",
     "Whole-image score with no localisation: an edited region in a captured "
     "photograph is a manipulation question, not a generation one.",
+    "It also responds to regions filled in locally (it was trained on real photos "
+    "with inpainted patches): it flagged 4 of 20 camera photos with an object removed "
+    "by classical inpainting, and 0 of 60 unedited ones. On an edited photo an "
+    "indication may mean a filled-in region, not a generated image.",
     "Five 504 px crops cover a large image only partly; the rest is not examined.",
     "'Not indicated' is not evidence that an image was captured by a camera.",
 ]

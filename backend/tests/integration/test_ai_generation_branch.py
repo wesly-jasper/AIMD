@@ -220,3 +220,14 @@ def test_api_reports_both_branches_and_the_verified_copy(monkeypatch):
     assert "no comparable image embedding for one of the images" in (
         match["verification"]["reasons"]
     )
+
+
+def test_ai_indication_on_an_edited_file_carries_the_overlap_note():
+    ai = {"status": "AI_GENERATION_INDICATED", "rationale": "B-Free indicated generation."}
+    noted = AnalysisPipeline._with_edit_note(ai, "LIKELY_MANIPULATED")
+    assert "same local edit" in noted["edit_overlap_note"]
+    assert noted["rationale"].startswith("B-Free indicated generation.")
+    assert noted["status"] == "AI_GENERATION_INDICATED"  # the branch's finding is not changed
+    assert "edit_overlap_note" not in AnalysisPipeline._with_edit_note(ai, "NO_SIGNIFICANT_ANOMALIES_DETECTED")
+    cleared = {"status": "NOT_INDICATED", "rationale": "x"}
+    assert AnalysisPipeline._with_edit_note(cleared, "SUSPICIOUS") is cleared

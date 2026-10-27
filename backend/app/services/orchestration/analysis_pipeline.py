@@ -1124,6 +1124,25 @@ class AnalysisPipeline:
         return {**result, "status": primary["status"], "rationale": rationale}
 
     @staticmethod
+    def _with_edit_note(ai: dict, category: str) -> dict:
+        """
+        The branches stay separate, but an AI indication on a file the
+        manipulation branch found edited needs a reader's caution: B-Free also
+        fires on locally filled-in regions (4 of 20 classical object removals in
+        evaluation), so the two findings may describe the same local edit.
+        """
+        if ai.get("status") != "AI_GENERATION_INDICATED" or category not in (
+            Assessment.SUSPICIOUS.value, Assessment.LIKELY_MANIPULATED.value
+        ):
+            return ai
+        note = (
+            "The manipulation check also found signs of editing. An AI-generation "
+            "detector can respond to a region that was filled in locally, so both "
+            "results may describe the same local edit rather than a generated image."
+        )
+        return {**ai, "edit_overlap_note": note, "rationale": f"{ai.get('rationale', '')} {note}".strip()}
+
+    @staticmethod
     def _ai_entry(det) -> dict:
         """One AI-generation detector's result, with its own wording."""
         meta = getattr(det, "detector_metadata", None) or {}
@@ -1249,7 +1268,9 @@ class AnalysisPipeline:
                 "rule": decision.rule,
                 "rationale": decision.rationale,
                 "coverage_gaps": gaps,
-                "ai_generation": self._decide_ai_generation(detections),
+                "ai_generation": self._with_edit_note(
+                    self._decide_ai_generation(detections), decision.category
+                ),
                 "evidence_fusion": fuse(
                     detections, advisory=settings.ai_generation_advisory_detectors or ()
                 ),

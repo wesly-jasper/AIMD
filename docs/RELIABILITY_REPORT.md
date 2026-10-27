@@ -274,6 +274,7 @@ Version 2 matches against the two nearest *other* keypoints, orients pairs consi
 
 **Still open.**
 - **AI inpainting:** recall on GLIDE inpainting (256 px CocoGlide) stays at 32/102 = 31%. TruFor wasn't trained on diffusion inpainting at that size, and no rule over its outputs recovers it.
+- **B-Free and local fills.** B-Free flagged 4 of 20 classical (OpenCV) object removals as AI, against 1/20 splices, 0/20 copy-moves and 0/60 unedited photos. It was trained on real photos with inpainted patches, so it responds to locally filled-in regions. Its limitations now say so. When it fires on a file the manipulation branch also found edited, the AI-generation result carries an `edit_overlap_note`: both findings may describe the same local edit. The branches are still decided separately.
 - **AI inpainting is not the AI-generation branch's job.** The AI-generation detectors answer a different question ("was the whole image generated?"), and partly generated images are excluded from that branch by design (`EVALUATION.md` §1). An inpainting-specific localiser is the next candidate.
 - **TruFor stability:** the out-of-memory recovery (§4.1) held in every run since, with 0 run errors in 1,004 file-runs.
 
