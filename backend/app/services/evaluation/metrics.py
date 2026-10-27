@@ -190,7 +190,7 @@ def branch_score_detector(records: Iterable[dict[str, Any]], branch: str) -> Opt
 #: Every detector that answers each branch's question, measured on its own
 #: decision as well as through the branch verdict.
 BRANCH_DETECTORS = {
-    "manipulation": ("TruForDetector",),
+    "manipulation": ("TruForDetector", "CopyMoveDetector"),
     "ai_generation": ("UnivFDDetector", "BFreeDetector"),
 }
 _OWN_FLAGGED = frozenset({"FLAGGED"})

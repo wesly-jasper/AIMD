@@ -618,6 +618,9 @@ class AssessmentRecord(Base):
     # The AI-generation branch, reported beside the manipulation verdict above and
     # never blended into it. NULL for assessments made before the branch existed.
     ai_generation: Mapped[Optional[dict]] = mapped_column(JSON)
+    # Likelihood-ratio ranges per branch, beside the categories above and never
+    # changing them (services/fusion). NULL for assessments made before it.
+    evidence_fusion: Mapped[Optional[dict]] = mapped_column(JSON)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
     analysis: Mapped["AnalysisRecord"] = sa_relationship(back_populates="assessment_record")

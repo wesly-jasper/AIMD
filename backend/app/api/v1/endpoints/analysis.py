@@ -182,6 +182,9 @@ def get_analysis(
         # Reported beside the manipulation assessment, never folded into it.
         # NULL for analyses recorded before the branch existed.
         "ai_generation": assessment_record.ai_generation if assessment_record else None,
+        # How strongly the observations bear on each branch, as likelihood-ratio
+        # ranges with conflicts listed. Beside the categories, never changing them.
+        "evidence_fusion": assessment_record.evidence_fusion if assessment_record else None,
         "similarity_matches": [
             {
                 "id": m.id,

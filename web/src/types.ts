@@ -303,6 +303,39 @@ export interface Finding {
   contradicting_observation_ids: string[];
 }
 
+export type FusionStatus = "SUPPORTS" | "AGAINST" | "LIMITED" | "CONFLICTING" | "NOT_ASSESSED";
+
+export interface FusionContribution {
+  detector: string;
+  family: string;
+  status: "observed" | "no_observation" | "not_run";
+  advisory: boolean;
+  direction?: 1 | -1;
+  calibrated?: boolean;
+  log10_lr?: number | null;
+  capped?: boolean;
+  counted?: boolean;
+}
+
+/** One branch's evidence as a likelihood-ratio range; never changes the verdicts. */
+export interface FusionBranch {
+  status: FusionStatus;
+  statement: string;
+  log10_lr_range?: [number, number];
+  strength?: string;
+  any_capped?: boolean;
+  conflicts: { for: string; against: string }[];
+  uncalibrated: string[];
+  contributions: FusionContribution[];
+}
+
+export interface EvidenceFusion {
+  method: string;
+  version: number;
+  manipulation: FusionBranch;
+  ai_generation: FusionBranch;
+}
+
 export interface AnalysisDetail {
   analysis_id: string;
   media_id: string;
@@ -329,6 +362,8 @@ export interface AnalysisDetail {
   } | null;
   /** NULL for analyses recorded before the branch existed. */
   ai_generation: AiGeneration | null;
+  /** NULL for analyses recorded before evidence fusion existed. */
+  evidence_fusion?: EvidenceFusion | null;
   suspicious_segments: Segment[];
   similarity_matches: SimilarityMatch[];
   /** NULL before source search existed; keyed by connector name. */

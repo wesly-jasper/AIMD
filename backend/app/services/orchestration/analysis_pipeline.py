@@ -52,6 +52,7 @@ from app.services.provenance.graph import build_provenance_graph
 from app.services.evidence.evidence_service import EvidenceService
 from app.services.evidence.report_generator import ReportGenerator
 from app.services.detection.detection_container import get_detection_container
+from app.services.fusion.evidence_fusion import fuse
 
 logger = logging.getLogger(__name__)
 
@@ -1249,6 +1250,9 @@ class AnalysisPipeline:
                 "rationale": decision.rationale,
                 "coverage_gaps": gaps,
                 "ai_generation": self._decide_ai_generation(detections),
+                "evidence_fusion": fuse(
+                    detections, advisory=settings.ai_generation_advisory_detectors or ()
+                ),
             })
         except Exception as exc:
             db.rollback()

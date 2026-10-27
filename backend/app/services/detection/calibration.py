@@ -126,6 +126,15 @@ def expected_calibration_error(probs: Sequence[float], targets: Sequence[bool], 
     return float(total)
 
 
+#: For a detector that is almost always silent and occasionally fires (the
+#: copy-move detector): its evidence is whether it fired, and a sigmoid through
+#: a pile of zeros and a few large values comes out nearly flat.
+FLAG_RATE = "flag_rate"
+#: Detectors calibrated by flag rate rather than Platt scaling. Their score is
+#: an inlier-count severity that is 0 on almost every file.
+FLAG_RATE_DETECTORS = frozenset({"CopyMoveDetector"})
+
+
 @dataclass
 class Calibration:
     detector: str
@@ -141,6 +150,12 @@ class Calibration:
     created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
     def probability(self, raw: float) -> float:
+        if self.method == FLAG_RATE:
+            # a = P(flag | positive), b = P(flag | negative), both smoothed; the
+            # score only says which side of ``threshold`` the detector came down.
+            lr = self.a / self.b if raw >= self.threshold else (1 - self.a) / (1 - self.b)
+            odds = lr * self.prior / (1 - self.prior)
+            return float(odds / (1 + odds))
         return float(_sigmoid(self.a * _logit(np.asarray([raw], dtype=float)) + self.b)[0])
 
     def provenance(self) -> dict[str, Any]:
@@ -197,6 +212,40 @@ def fit(
     )
 
 
+def fit_flag_rate(
+    detector: str,
+    detector_version: str,
+    scores: Sequence[float],
+    targets: Sequence[bool],
+    *,
+    flag_threshold: float,
+    fitted_on: dict[str, Any],
+) -> Calibration:
+    """
+    Flag rates among positives and negatives, with add-one-half smoothing, so a
+    detector that never fired on the negatives gets a large but finite ratio.
+    """
+    y = np.asarray(targets, dtype=bool)
+    flagged = np.asarray(scores, dtype=float) >= flag_threshold
+    if y.all() or not y.any():
+        raise ValueError("flag-rate calibration needs both classes")
+    tp, fp = int(flagged[y].sum()), int(flagged[~y].sum())
+    a = (tp + 0.5) / (int(y.sum()) + 1)
+    b = (fp + 0.5) / (int((~y).sum()) + 1)
+    if a <= b:
+        raise ValueError(
+            f"the detector fired no more often on positives ({tp}/{int(y.sum())}) than "
+            f"on negatives ({fp}/{int((~y).sum())}) on this split"
+        )
+    return Calibration(
+        detector=detector, detector_version=detector_version, method=FLAG_RATE,
+        a=a, b=b, threshold=flag_threshold, target_fpr=round(b, 4), prior=float(y.mean()),
+        fitted_on={**fitted_on, "positives": int(y.sum()), "negatives": int((~y).sum())},
+        validation={"fpr": round(fp / max(1, int((~y).sum())), 4),
+                    "recall": round(tp / max(1, int(y.sum())), 4)},
+    )
+
+
 # ── Storage and lookup ────────────────────────────────────────────────────────
 
 
@@ -220,7 +269,11 @@ def active_calibrations() -> dict[str, Calibration]:
     """The calibrations at ``settings.calibration_path``, reloaded when the file changes."""
     from app.core.config import settings
 
-    path = settings.calibration_path
+    return calibrations_at(settings.calibration_path)
+
+
+def calibrations_at(path: Optional[str | Path]) -> dict[str, Calibration]:
+    """The calibrations in the file at ``path`` (``{}`` if unset or missing), cached by mtime."""
     if not path:
         return {}
     path = Path(path)
@@ -260,7 +313,8 @@ def calibrate_score(detector: str, detector_version: Optional[str], raw: float) 
     return {
         "applied": True,
         "probability": round(probability, 6),
-        "flagged": probability >= calibration.threshold,
+        # A flag-rate calibration's threshold is on the raw score (did it fire?).
+        "flagged": (raw if calibration.method == FLAG_RATE else probability) >= calibration.threshold,
         "raw_score": raw,
         **calibration.provenance(),
     }

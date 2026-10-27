@@ -258,25 +258,29 @@ def cmd_calibrate(args) -> int:
             print(f"{detector}: skipped (needs both classes on the {args.split} split)")
             continue
         try:
-            cal = calibration.fit(
-                detector, versions.pop(), scores, targets, target_fpr=args.target_fpr,
-                fitted_on={"dataset_sha256": info.get("dataset_sha256"), "split": args.split,
-                           "run": run_dir.name, "commit": info.get("commit")},
-            )
+            fitted_on = {"dataset_sha256": info.get("dataset_sha256"), "split": args.split,
+                         "run": run_dir.name, "commit": info.get("commit")}
+            if detector in calibration.FLAG_RATE_DETECTORS:
+                cal = calibration.fit_flag_rate(detector, versions.pop(), scores, targets,
+                                                flag_threshold=0.5, fitted_on=fitted_on)
+            else:
+                cal = calibration.fit(detector, versions.pop(), scores, targets,
+                                      target_fpr=args.target_fpr, fitted_on=fitted_on)
         except ValueError as exc:
             print(f"{detector}: not calibrated -- {exc}")
             continue
-        if cal.validation["ece_calibrated"] > cal.validation["ece_raw"]:
+        if cal.validation.get("ece_calibrated", 0) > cal.validation.get("ece_raw", 1):
             print(f"{detector}: warning -- calibration error rose on {args.split} "
                   f"({cal.validation['ece_raw']} -> {cal.validation['ece_calibrated']})")
         fitted[detector] = cal
-        print(f"{detector}: a={cal.a:.3f} b={cal.b:.3f} threshold={cal.threshold:.4f} "
+        print(f"{detector} [{cal.method}]: a={cal.a:.3f} b={cal.b:.3f} threshold={cal.threshold:.4f} "
               f"validation={cal.validation} n={cal.fitted_on['positives']}+/{cal.fitted_on['negatives']}-")
     if not fitted:
         print("nothing was calibrated")
         return 1
     calibration.save(fitted, args.out)
-    print(f"written: {args.out} -- set CALIBRATION_PATH to apply it, then evaluate on the test split")
+    print(f"written: {args.out} -- set FUSION_CALIBRATION_PATH to quantify evidence only, or "
+          "CALIBRATION_PATH to also apply it to detector flags; then evaluate on the test split")
     return 0
 
 

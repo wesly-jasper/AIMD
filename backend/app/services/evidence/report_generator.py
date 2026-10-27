@@ -9,7 +9,7 @@ Structures reports into clear forensic sections with strict evidential labeling:
 """
 import json
 from datetime import datetime, timezone
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 
 class ReportGenerator:
@@ -90,6 +90,7 @@ class ReportGenerator:
         lines.extend(self._ai_generation_lines(
             evidence_package.get("ai_generation_evidence") or {}
         ))
+        lines.extend(self._fusion_lines(evidence_package.get("evidence_fusion")))
 
         lines.extend([
             "",
@@ -342,6 +343,32 @@ class ReportGenerator:
             "heuristic severity, ordinal only"
         )
         return f"`{value:.3f}` ({label})"
+
+    @staticmethod
+    def _fusion_lines(fusion: Optional[Dict[str, Any]]) -> list[str]:
+        """
+        Strength of the evidence per branch, as likelihood-ratio ranges. Shown
+        after both verdicts, and labelled as not changing them.
+        """
+        if not fusion:
+            return []
+        lines = ["", "### Strength of Evidence (likelihood ratios; does not change the verdicts above)", ""]
+        for branch, title in (("manipulation", "Manipulation"), ("ai_generation", "AI generation")):
+            part = fusion.get(branch) or {}
+            status = part.get("status", "NOT_ASSESSED")
+            line = f"- **{title}:** `{status}`"
+            if part.get("log10_lr_range"):
+                low, high = part["log10_lr_range"]
+                line += f", log10 LR {low:+.2f} to {high:+.2f} ({part.get('strength')})"
+            lines.append(line)
+            if part.get("statement"):
+                lines.append(f"  - {part['statement']}")
+            for c in part.get("conflicts") or []:
+                lines.append(f"  - Conflict: {c['for']} points towards, {c['against']} against.")
+            if part.get("uncalibrated"):
+                lines.append("  - Direction only (no calibration for this version): "
+                             + ", ".join(part["uncalibrated"]))
+        return lines
 
     @staticmethod
     def _ai_generation_lines(ai: Dict[str, Any]) -> list[str]:

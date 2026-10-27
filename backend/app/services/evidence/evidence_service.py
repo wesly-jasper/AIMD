@@ -301,6 +301,7 @@ class EvidenceService:
             "detection_evidence": detection_evidence,
             "similarity_evidence": similarity_evidence,
             "ai_generation_evidence": ai_generation_evidence,
+            "evidence_fusion": (assessment_record.evidence_fusion if assessment_record else None),
             "source_evidence": source_evidence,
             "provenance_timeline": provenance_timeline,
             "provenance_evidence": provenance_evidence,

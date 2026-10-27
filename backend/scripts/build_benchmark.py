@@ -40,6 +40,7 @@ from pathlib import Path
 
 BACKEND = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(BACKEND))
+sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 from PIL import Image  # noqa: E402
 

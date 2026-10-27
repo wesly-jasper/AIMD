@@ -6,7 +6,7 @@ import { WhatWeChecked } from "../components/Coverage";
 import { EvidenceView, regionsOf } from "../components/Evidence";
 import { ContentCredentialsCard } from "../components/Credentials";
 import { InvestigationCard } from "../components/Investigation";
-import { BranchCards, HeatmapCard, ProvenanceCard, SourcesCard, VideoTimeline } from "../components/Panels";
+import { BranchCards, EvidenceStrengthCard, HeatmapCard, ProvenanceCard, SourcesCard, VideoTimeline } from "../components/Panels";
 import { ReportCard } from "../components/Report";
 import { Shell } from "../components/Shell";
 import { POLARITY, SEMANTICS, count, dateTime, duration, familyLabel, score } from "../format";
@@ -184,6 +184,7 @@ export function Result() {
       {finished && (
         <>
           <BranchCards d={d} />
+          <EvidenceStrengthCard fusion={d.evidence_fusion} />
           {d.media_type === "image" ? (
             <div className="grid">
               <HeatmapCard analysisId={d.analysis_id} mediaId={d.media_id} detections={d.detections} />

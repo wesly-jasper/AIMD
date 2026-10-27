@@ -186,6 +186,10 @@ class Settings(BaseSettings):
     # calibration.json written by `scripts/evaluate.py calibrate`. Applied only
     # to the exact detector version it was fitted for; unset = raw scores.
     calibration_path: Optional[Path] = None
+    # Calibrations used only to quantify evidence (likelihood ratios in the
+    # assessment's evidence_fusion block); detectors' own flags and the
+    # verdicts are unchanged. Unset = calibration_path; neither = not quantified.
+    fusion_calibration_path: Optional[Path] = None
     # Let flagged video keyframes set the video-level verdict. Off: on the
     # evaluation set (80 clips, 2026-10-27) the keyframe rule flagged 3/20
     # genuine clips and 10/60 manipulated ones -- false positives with no

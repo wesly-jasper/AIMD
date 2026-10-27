@@ -413,3 +413,21 @@ def test_branch_auc_uses_the_deciding_detector_when_it_ran():
     assert branch_score_detector(both, "ai_generation") == "BFreeDetector"
     assert branch_score_detector(univfd_only, "ai_generation") == "UnivFDDetector"
     assert branch_score_detector([], "ai_generation") is None
+
+
+def test_flag_rate_calibration_for_a_detector_that_rarely_fires():
+    scores = [0.0] * 60 + [0.8] * 5 + [0.0] * 68
+    targets = [True] * 65 + [False] * 68
+    cal = calibration.fit_flag_rate("CopyMoveDetector", "2", scores, targets,
+                                    flag_threshold=0.5, fitted_on={})
+    prior_odds = cal.prior / (1 - cal.prior)
+    fired = cal.probability(0.8) / (1 - cal.probability(0.8)) / prior_odds
+    silent = cal.probability(0.0) / (1 - cal.probability(0.0)) / prior_odds
+    assert fired == pytest.approx((5.5 / 66) / (0.5 / 69))  # smoothed, finite though 0/68 fired
+    assert 0.9 < silent < 1.0  # silence is barely evidence
+
+
+def test_flag_rate_calibration_refuses_a_detector_that_does_not_discriminate():
+    with pytest.raises(ValueError):
+        calibration.fit_flag_rate("CopyMoveDetector", "2", [0.8, 0.0, 0.8, 0.0],
+                                  [True, True, False, False], flag_threshold=0.5, fitted_on={})

@@ -27,7 +27,7 @@ from sqlalchemy import create_engine, inspect
 from app.db.database import alembic_config
 from app.db.models import Base
 
-HEAD = "a9d3e7c1f5b2"
+HEAD = "b3f8d1e6a2c7"
 
 
 @pytest.fixture
