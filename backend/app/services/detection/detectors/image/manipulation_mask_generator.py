@@ -128,7 +128,7 @@ class ManipulationMaskGenerator(BaseDetector):
             # which made a crash in mask computation look like a detector that had
             # never been installed -- hiding a defect that needs a code fix behind
             # what reads as a configuration gap.
-            return self.failed(f"Mask computation failed: {type(e).__name__}")
+            return self.failed_from("Mask computation failed", e)
 
     def _generate_multiscale_heatmap(self, img: np.ndarray) -> np.ndarray:
         """Generate manipulation heatmap at multiple scales and fuse them."""

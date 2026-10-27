@@ -46,14 +46,14 @@ import logging
 from pathlib import Path
 from typing import Any
 
+from app.core.config import settings
 from app.schemas.detection import (
     Assessment,
     DetectionResult,
-    DetectorAvailability,
     DetectorExecutionStatus,
     EvidenceStrength,
-    ScoreSemantics,
 )
+from app.services.detection.runtime import run_detector
 
 logger = logging.getLogger(__name__)
 
@@ -86,6 +86,11 @@ _SIGNAL_FAMILY: dict[str, str] = {
     # Whole-image "was this generated?", not "was this edited?". Reported on its
     # own branch of the assessment, never counted toward the manipulation verdict.
     "UnivFDDetector": "ai_generation",
+    "BFreeDetector": "ai_generation",
+    # The same two models run on selected video frames (engine/video_keyframes):
+    # same physical basis, so the same families.
+    "VideoKeyframeTruFor": "learned",
+    "VideoKeyframeUnivFD": "ai_generation",
     # Object presence is not manipulation evidence. A detector that finds a dog in
     # a photograph has established that there is a dog in the photograph. It is
     # kept out of every family so it can never contribute to an assessment.
@@ -113,38 +118,20 @@ class ImageDetectionEngine:
         if not self.detectors:
             raise RuntimeError("No image detectors are configured")
 
-        results: list[DetectionResult] = []
-        for detector in self.detectors:
-            name = type(detector).__name__
-            try:
-                result = detector.detect(file_path)
-                if not isinstance(result, DetectionResult):
-                    raise TypeError(
-                        f"Detector {name} must return DetectionResult"
-                    )
-            except Exception as exc:
-                logger.warning("Detector %s failed: %s", name, exc)
-                # AVAILABLE + FAILED, not UNAVAILABLE. The detector was present
-                # and was invoked; it raised. Recording this as UNAVAILABLE would
-                # disguise a defect in our code as an absent dependency, and the
-                # two have completely different remedies.
-                results.append(DetectionResult(
-                    detector=name,
-                    media_type="image",
-                    manipulation_detected=False,
-                    confidence=0.0,
-                    manipulation_type="unknown",
-                    availability=DetectorAvailability.AVAILABLE,
-                    execution_status=DetectorExecutionStatus.FAILED,
-                    score_semantics=ScoreSemantics.NOT_APPLICABLE,
-                    status_reason=f"{type(exc).__name__}: detector execution failed",
-                    metadata={
-                        "status": "failed",
-                        "reason": f"{type(exc).__name__}: detector execution failed",
-                    },
-                ))
-                continue
-            results.append(result)
+        # Each detector runs bounded by a timeout, is retried once after running
+        # out of memory, and has its outcome recorded for /health. A detector
+        # that raises or hangs becomes AVAILABLE + FAILED -- never UNAVAILABLE,
+        # which would disguise a defect as an absent dependency. See
+        # app.services.detection.runtime.
+        results: list[DetectionResult] = [
+            run_detector(
+                detector,
+                file_path,
+                timeout_s=settings.detector_timeout_seconds,
+                retry_on_memory_error=settings.detector_retry_on_memory_error,
+            )
+            for detector in self.detectors
+        ]
 
         aggregate = self._aggregate(results)
 

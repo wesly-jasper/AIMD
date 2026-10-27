@@ -10,6 +10,7 @@ from app.schemas.detection import (
     DetectorExecutionStatus,
     ScoreSemantics,
 )
+from app.services.detection.calibration import calibrate_score
 from app.services.detection.detectors.base_detector import BaseDetector
 from app.services.evidence.heatmap_artefacts import write_heatmap_artefacts
 
@@ -85,11 +86,11 @@ class TruForDetector(BaseDetector):
         try:
             result = self.runner.predict(path)
         except Exception as exc:
-            logger.warning("TruFor inference failed: %s", exc)
+            logger.warning("TruFor inference failed", exc_info=True)
             # AVAILABLE + FAILED. The checkpoint loaded and inference broke, which
             # is a defect to fix -- not the same thing as the checkpoint being
             # absent, and it must not be recorded as though it were.
-            return self.failed(f"TruFor inference failed: {type(exc).__name__}")
+            return self.failed_from("TruFor inference failed", exc)
 
         if "manipulation_detected" not in result or "confidence" not in result:
             # A malformed runner response cannot be guessed at. Raising here would
@@ -162,16 +163,31 @@ class TruForDetector(BaseDetector):
                 metadata=metadata,
             )
 
+        confidence = float(result["confidence"])
+        detected = bool(result["manipulation_detected"])
+        semantics = self.score_semantics
+        # A calibration fitted for exactly these weights turns the integrity
+        # score into a probability with a recorded procedure, and replaces the
+        # fixed 0.5 cut with the threshold chosen for its target FPR. Otherwise
+        # the score stays RAW, and a version mismatch is stated, not hidden.
+        calibration = calibrate_score(self.detector_id, self.version, confidence)
+        if calibration is not None:
+            metadata["calibration"] = calibration
+            if calibration["applied"]:
+                confidence = calibration["probability"]
+                detected = calibration["flagged"]
+                semantics = ScoreSemantics.CALIBRATED_PROBABILITY
+
         return DetectionResult(
             detector=self.detector_id,
             detector_version=self.version,
             media_type="image",
-            manipulation_detected=bool(result["manipulation_detected"]),
-            confidence=float(result["confidence"]),
+            manipulation_detected=detected,
+            confidence=confidence,
             manipulation_type=self.manipulation_type,
             availability=DetectorAvailability.AVAILABLE,
             execution_status=DetectorExecutionStatus.COMPLETED,
-            score_semantics=self.score_semantics,
+            score_semantics=semantics,
             regions=regions,
             metadata=metadata,
         )

@@ -10,6 +10,7 @@ from app.schemas.detection import (
     DetectorExecutionStatus,
     ScoreSemantics,
 )
+from app.services.detection.calibration import calibrate_score
 from app.services.detection.detectors.base_detector import BaseDetector
 from app.services.detection.models.univfd_runner import LIMITATIONS, SEMANTICS
 
@@ -31,6 +32,11 @@ class UnivFDDetector(BaseDetector):
     supported_media_types = frozenset({"image"})
     manipulation_type = "ai_generation"
     score_semantics = ScoreSemantics.RAW_MODEL_SCORE
+    #: Name in messages, and what the score is / cannot do. A subclass for
+    #: another whole-image generation model overrides these three.
+    model_label = "UnivFD"
+    semantics = SEMANTICS
+    limitations = tuple(LIMITATIONS)
 
     def __init__(
         self,
@@ -49,7 +55,7 @@ class UnivFDDetector(BaseDetector):
         if self.initialization_error:
             return DetectorAvailability.UNAVAILABLE, self.initialization_error
         if self.runner is None:
-            return DetectorAvailability.UNAVAILABLE, "UnivFD runner is unavailable"
+            return DetectorAvailability.UNAVAILABLE, f"{self.model_label} runner is unavailable"
         return DetectorAvailability.AVAILABLE, None
 
     def detect(self, file_path: str | Path) -> DetectionResult:
@@ -59,7 +65,7 @@ class UnivFDDetector(BaseDetector):
 
         availability, reason = self.availability()
         if availability is not DetectorAvailability.AVAILABLE:
-            return self.unavailable(reason or "UnivFD runner is unavailable")
+            return self.unavailable(reason or f"{self.model_label} runner is unavailable")
 
         started = time.perf_counter()
         try:
@@ -67,19 +73,31 @@ class UnivFDDetector(BaseDetector):
             score = float(result["score"])
             logit = float(result["logit"])
         except Exception as exc:
-            logger.warning("UnivFD inference failed: %s", exc)
-            return self.failed(f"UnivFD inference failed: {type(exc).__name__}")
+            logger.warning("%s inference failed", self.model_label, exc_info=True)
+            return self.failed_from(f"{self.model_label} inference failed", exc)
 
         metadata = {
             **dict(result.get("metadata", {})),
             "branch": "ai_generation",
             "logit": round(logit, 6),
             "threshold": self.threshold,
-            "semantics": SEMANTICS,
-            "limitations": list(LIMITATIONS),
+            "semantics": self.semantics,
+            "limitations": list(self.limitations),
             "execution_time_ms": round((time.perf_counter() - started) * 1000.0, 1),
         }
         indicated = score >= self.threshold
+        confidence = round(min(max(score, 0.0), 1.0), 6)
+        semantics = self.score_semantics
+        calibration = calibrate_score(self.detector_id, self.version, score)
+        if calibration is not None:
+            metadata["calibration"] = calibration
+            if calibration["applied"]:
+                confidence = calibration["probability"]
+                indicated = calibration["flagged"]
+                semantics = ScoreSemantics.CALIBRATED_PROBABILITY
+                # The decision is now made against the calibrated threshold.
+                metadata["raw_threshold"] = self.threshold
+                metadata["threshold"] = calibration["threshold"]
         return DetectionResult(
             detector=self.detector_id,
             detector_version=self.version,
@@ -93,10 +111,10 @@ class UnivFDDetector(BaseDetector):
                 Assessment.LIKELY_AI_GENERATED if indicated
                 else Assessment.NO_SIGNIFICANT_ANOMALIES_DETECTED
             ),
-            confidence=round(min(max(score, 0.0), 1.0), 6),
+            confidence=confidence,
             manipulation_type=self.manipulation_type,
             availability=DetectorAvailability.AVAILABLE,
             execution_status=DetectorExecutionStatus.COMPLETED,
-            score_semantics=self.score_semantics,
+            score_semantics=semantics,
             metadata=metadata,
         )

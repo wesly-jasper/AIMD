@@ -152,6 +152,92 @@ The machine (16 GB RAM) ran out of Windows commit memory twice, because two back
    - **Likely cause:** the out-of-memory fallback in `TruForRunner._infer` moves the model to the CPU, retries, then moves it back in a `finally`. If the move back fails, the model is left split across devices and every later call raises.
    - **Fix:** recover or reload the model when that happens, and make `/health` report a detector that is failing on every request.
 
+### 4.1 Fixed since (2026-10-27)
+
+| Failure above | Change | Where |
+|---|---|---|
+| 1. Hard crash loading CLIP under memory pressure | **Before loading, checks free memory.** TruFor and UnivFD are loaded only when `MODEL_LOAD_MIN_FREE_MB` (default 2048) is free. Otherwise the detector is UNAVAILABLE with the reason stated. **One model copy per process.** `/health` used to build a second detector router of its own, which loaded TruFor a second time; there is now one shared container. | `runtime.memory_preflight`, `detection_container.get_detection_container` |
+| 2. Silent degradation, one-word reason | **Timeouts.** Every detector call has a timeout (`DETECTOR_TIMEOUT_SECONDS`, 180 s). A hang becomes FAILED "timed out" instead of a hung request. **One retry after out of memory.** An allocation failure is retried once, after cached memory is released. The reason says "(out of memory)", and the full traceback is logged. | `runtime.run_detector` |
+| 3. TruFor stuck after an OOM until restart | **Model recovery.** Each call first checks that the model is wholly on its device. If not, it moves it back, or reloads it from the verified checkpoint. The runner's lock is bounded, so a hung call can't block later ones forever. | `TruForRunner._restore`, `_infer` |
+| `/health` said "configured" throughout | **Health from real runs.** `/health` now reports each detector's availability and what its runs since startup did: OPERATIONAL, DEGRADED, FAILING, UNTESTED or UNAVAILABLE. A FAILING detector turns the service `degraded`. **On-demand self-test.** `POST /api/v1/system/detectors/self-test` (admin only) runs every detector on a probe image. `?reload=true` rebuilds the detectors after memory has been freed. | `core/health.py`, `endpoints/system.py` |
+| (new) Evidence integrity | **Hash check before analysis.** The pipeline re-hashes the stored file and compares it with the SHA-256 recorded at ingest before any stage runs. A mismatch fails the analysis. | `AnalysisPipeline._verify_integrity` |
+
+### 4.2 Re-measured with the in-process runner (2026-10-27)
+
+This is the same web + CocoGlide data, now split by source image into validation (40%) and test (60%). It ran through `scripts/evaluate.py` (see `EVALUATION.md`). Test split: 331 files.
+
+| | Manipulation | AI generation |
+|---|---|---|
+| Recall | 60/138 = 43% [35–52%] | 4/55 = 7% [3–17%] |
+| False-positive rate | 10/138 = 7% [4–13%] | 15/174 = 9% [5–14%]. Edited photos 13/36 = 36%; real photos 2/138 |
+| Balanced accuracy | 0.68 | 0.49 |
+| Score AUC | 0.77 [0.71–0.82] | 0.63 [0.54–0.71] |
+
+**Recall by kind:** splice 88%, removal 85%, copy-move 67%, GLIDE inpainting 38%.
+
+**Localisation:** IoU ≥ 0.5 on 48/138 = 35%. This set is dominated by the 256 px CocoGlide images.
+
+**Operations:** 0 run errors and 0 silent failures in 502 files.
+
+**Video, with the new keyframe stage.** All 80 clips ran with 0 errors. The stage detects shot boundaries, selects frames (one per shot plus both sides of every cut), and runs TruFor and UnivFD on each.
+
+| | Real | Insertion | Overlay | Deletion |
+|---|---|---|---|---|
+| Keyframe TruFor flagged the clip | 3/20 | 4/20 | 5/20 | 1/20 |
+| Shot boundary within ±1 s of the edit | – | **20/20** | 1/20 | 1/20 |
+
+- **Cuts localise insertions,** but genuine clips also had 15 cuts between them. Cuts are therefore reported for review, not as evidence.
+- **Keyframe TruFor does not separate** manipulated from genuine 240p clips: it flagged 15% of genuine clips and 17% of manipulated ones. Its flags therefore **do not set the video verdict** (`VIDEO_KEYFRAME_VERDICTS_ENABLED=false`). They are shown with timestamps for review.
+- **Thread leak found and fixed.** The video run exposed a leak in the detector timeout wrapper. It created a thread per call, and each new thread got its own native OpenMP pool, so the process reached 6,400 threads and 5.6 GB. Workers are now reused per detector.
+
+**Calibration.** Platt scaling was fitted on validation with a 5% FPR target, then applied on test. Every change was **within noise**: manipulation recall 43% → 49%, FPR 7% → 9%, AUC unchanged. That is expected, because a monotone rescaling cannot separate the classes better. Its value is an honest probability and a recorded threshold. **Calibration stays off by default.** The 5% target held on validation but came out at 8.7% on test, because 72 validation negatives are too few to set a threshold reliably.
+
+### 4.3 A second AI-generation detector: B-Free (2026-10-27)
+
+UnivFD missed 93% of generated images in §4.2, so Phase 2 screened a replacement on the same test split. The aim was a gain in recall without more genuine images flagged.
+
+**Candidates:**
+- **B-Free** (Guillaro et al., CVPR 2025). A DINOv2 ViT-B/14 scoring five 504 px crops, trained on content-matched real/fake pairs, which is meant to stop it learning scene semantics or JPEG artefacts.
+  - Weights: `BFREE_dino2reg4.zip`, MD5 checked, SHA-256 pinned in `bfree_release.py`.
+  - Reimplemented in `bfree_runner.py`. A unit test reproduces the authors' reference logits to 1e-3.
+- **ClipBased** (Cozzolino et al., CVPR-W 2024). Cloned, not screened. It is the same CLIP-feature idea as UnivFD, which had just failed here.
+- **AIDE** (Yan et al., ICLR 2025). Not screened. It needs a ConvNeXt-XXL CLIP backbone, which won't fit beside TruFor in 4 GB of GPU memory.
+
+**Result (test split, 331 files, raw threshold logit > 0, nothing fitted on these files):**
+
+| | UnivFD | **B-Free** |
+|---|---|---|
+| Recall | 4/55 = 7% [3–17%] | **38/55 = 69% [56–80%]** |
+| False-positive rate, all non-generated | 15/174 = 9% [5–14%] | **6/174 = 3% [2–7%]** |
+| Of which edited photos | 13/36 = 36% | 2/36 = 6% |
+| Of which real photos | 2/138 = 1% | 4/138 = 3% [1–7%] |
+| Balanced accuracy | 0.49 | **0.83** |
+| Score AUC | 0.63 [0.54–0.71] | **0.86 [0.79–0.92]** |
+
+Validation agrees: recall 74%, FPR 8%, AUC 0.92.
+
+The intervals for recall and AUC don't overlap, and B-Free's false positives fall, especially on edited photos. **This is a real improvement by the plan's criterion.**
+
+**By generator (recall):**
+
+| Generator | Recall |
+|---|---|
+| Stable Diffusion | 11/11 |
+| Midjourney | 7/8 |
+| DALL-E 3 | 8/10 |
+| DALL-E 2 | 7/9 |
+| ChatGPT / GPT-image | 3/10 |
+| Grok / Flux | 2/7 |
+
+The two newest families together come to 5/17 = 29% [13–53%]. **"Not indicated" still doesn't clear an image made by GPT-image or Flux.**
+
+**Branch policy.** Letting both detectors vote turned 105 of the 331 test verdicts into CONFLICTING, almost all from UnivFD's misses, and left only 22 files indicated.
+- **UnivFD is now advisory** (`AI_GENERATION_ADVISORY_DETECTORS=["UnivFDDetector"]`). It is still run and shown, marked "does not count", but it votes only when no other AI detector produced a score.
+- **The branch verdict now equals B-Free's figures above.**
+- **B-Free is enabled in the local `.env`.** Its licence, like TruFor's, is research / non-profit only. Without the weights, the branch falls back to UnivFD as before.
+
+**Still short of target:** balanced accuracy 0.83 meets the ≥ 0.80 target. FPR 3% meets ≤ 5%, but its interval runs to 7%. With 55 generated test files, a larger test set is needed before calling the target met.
+
 ## 5. What to rely on, and what not to
 
 **Rely on:**
@@ -161,8 +247,8 @@ The machine (16 GB RAM) ran out of Windows commit memory twice, because two back
 
 **Don't rely on:**
 - **"No significant anomalies"** as evidence of authenticity. It missed 20% of controlled edits, 66% of generative inpaintings and 78% of recompressed ones, which is what the product wording already says.
-- **"AI generation not indicated".** It missed 90% of AI images.
-- **"Possible AI generation" on a photo.** It is more often a sign of editing (§3.3).
+- **"AI generation not indicated".** UnivFD missed 90% of AI images. B-Free (§4.3) misses 31% overall, and about 70% of GPT-image and Flux images.
+- **"Possible AI generation" on a photo, from UnivFD.** It is more often a sign of editing (§3.3). B-Free flagged 2 of 36 edited photos (§4.3), and UnivFD no longer votes when B-Free has a score.
 - **Any video verdict.** None is ever reached.
 - **Multi-detector corroboration.** No manipulation detector other than TruFor fired in 502 images.
 - **VERIFIED_MATCH as proof that a file is unedited** (§3.5).

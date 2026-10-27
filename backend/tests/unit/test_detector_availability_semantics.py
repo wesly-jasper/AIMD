@@ -145,10 +145,18 @@ def test_health_reports_trufor_model_as_configured_not_operational(
     # mean the checkpoint was validated or that inference would succeed.
     assert response["detectors"]["trufor"] == "configured"
 
-    # /health must not assert per-detector availability it cannot introspect.
-    # It previously returned a hardcoded map that reported detectors as
-    # "available" without ever consulting the registry.
-    assert response["detectors"]["availability_introspection"] == "NOT_IMPLEMENTED"
+    # Per-detector availability comes from each constructed detector, and the
+    # operational state from its runs -- never from a hardcoded map, which is
+    # what /health used to return.
+    per_detector = response["detectors"]["detectors"]
+    assert per_detector, "the constructed detectors are reported"
+    for name, entry in per_detector.items():
+        assert entry["availability"] in ("AVAILABLE", "UNAVAILABLE"), name
+        assert entry["state"] in (
+            "OPERATIONAL", "DEGRADED", "FAILING", "UNTESTED", "UNAVAILABLE"
+        ), name
+        if entry["availability"] == "UNAVAILABLE":
+            assert entry["state"] == "UNAVAILABLE", name
     assert "models" not in response
 
 

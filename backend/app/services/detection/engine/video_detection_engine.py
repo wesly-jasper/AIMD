@@ -73,7 +73,10 @@ MAX_ANALYSIS_FRAMES = 120
 
 class VideoDetectionEngine:
 
-    def __init__(self, detectors=None):
+    def __init__(self, detectors=None, keyframe_analyzer=None):
+        #: Learned image detectors on selected frames (engine/video_keyframes).
+        #: Optional: without it only the temporal heuristics run.
+        self._keyframes = keyframe_analyzer
         self._image_detector = ForensicImageDetector()
         self._face_detector = BaselineFaceDetector()
         self._spatial_tracker = VideoSpatialTemporalTracker()
@@ -93,6 +96,41 @@ class VideoDetectionEngine:
         self._face_detector_undetermined = 0
 
     def detect(self, file_path: Path | str) -> dict[str, Any]:
+        output = self._detect_temporal(file_path)
+        if self._keyframes is None:
+            return output
+        return self._with_keyframes(output, Path(file_path))
+
+    def _with_keyframes(self, output: dict[str, Any], file_path: Path) -> dict[str, Any]:
+        """
+        Add the keyframe detectors' results beside the temporal engine's. A
+        failure of this stage is recorded per detector as FAILED; it never
+        removes the temporal result.
+        """
+        try:
+            keyframes = self._keyframes.analyse(file_path)
+        except Exception as exc:
+            logger.warning("Keyframe analysis failed", exc_info=True)
+            reason = f"keyframe analysis failed: {type(exc).__name__}"
+            failed = [
+                DetectionResult(
+                    detector=name, media_type="video", manipulation_detected=False,
+                    confidence=0.0, manipulation_type="unknown",
+                    availability=DetectorAvailability.AVAILABLE,
+                    execution_status=DetectorExecutionStatus.FAILED,
+                    score_semantics=ScoreSemantics.NOT_APPLICABLE, status_reason=reason,
+                )
+                for name in self._keyframes.detectors
+            ]
+            return {**output, "detections": list(output["detections"]) + failed}
+        return {
+            **output,
+            "detections": list(output["detections"]) + keyframes["detections"],
+            "keyframe_coverage": keyframes["coverage"],
+            "shot_boundaries": keyframes["shot_scan"]["cuts"],
+        }
+
+    def _detect_temporal(self, file_path: Path | str) -> dict[str, Any]:
         file_path = Path(file_path)
         if not file_path.exists():
             raise FileNotFoundError(f"File not found: {file_path}")

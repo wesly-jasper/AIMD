@@ -151,6 +151,13 @@ class EvidenceService:
                 "manipulation_type": det.manipulation_type,
                 "assessment": assessment,
                 "confidence": det.confidence,
+                # What the number is, and whether there is one at all: a raw
+                # model score, a calibrated probability and a heuristic severity
+                # are rendered differently, and a FAILED run has no score.
+                "score_semantics": _plain(det.score_semantics),
+                "availability": _plain(det.availability),
+                "execution_status": _plain(det.execution_status),
+                "status_reason": det.status_reason,
                 "evidence_category": category,
                 "regions_count": len(det.regions),
                 "regions": [
@@ -160,6 +167,7 @@ class EvidenceService:
                         "bbox": r.bbox,
                         "start_timestamp": r.start_timestamp,
                         "end_timestamp": r.end_timestamp,
+                        "mask_path": r.mask_path,
                     }
                     for r in det.regions[:10]  # Limit to 10 for package size
                 ],

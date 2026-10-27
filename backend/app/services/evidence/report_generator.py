@@ -158,12 +158,26 @@ class ReportGenerator:
                 conf = det.get("confidence", 0.0)
                 regions = det.get("regions", [])
 
+                meta_det = det.get("metadata", {}) or {}
+                status = det.get("execution_status") or "COMPLETED"
+                availability = det.get("availability") or "AVAILABLE"
                 lines.extend([
                     f"### Detector: `{det_name}`",
-                    f"- **Target:** `{m_type}` | **Assessment:** `{ass}` | **Confidence:** `{conf:.2%}`",
+                    f"- **Target:** `{m_type}` | **Assessment:** `{ass}` | "
+                    f"**Run:** `{availability}/{status}` | **Score:** "
+                    + self._score_text(conf, det.get("score_semantics"), meta_det),
                 ])
-
-                meta_det = det.get("metadata", {})
+                if det.get("status_reason"):
+                    lines.append(f"- **Status reason:** {det['status_reason']}")
+                coverage = meta_det.get("coverage") or {}
+                if coverage.get("statement"):
+                    lines.append(f"- **Coverage:** {coverage['statement']}")
+                cuts = (meta_det.get("temporal") or {}).get("cuts") or []
+                if cuts:
+                    lines.append(
+                        "- **Shot boundaries (for review, not evidence of editing):** "
+                        + ", ".join(f"{c['timestamp']}s" for c in cuts[:10])
+                    )
                 if meta_det.get("note"):
                     lines.append(f"- **Notes:** {meta_det.get('note')}")
 
@@ -306,6 +320,30 @@ class ReportGenerator:
         return "\n".join(lines)
 
     @staticmethod
+    def _score_text(value: Any, semantics: Any, metadata: Dict[str, Any]) -> str:
+        """
+        A score in the words its semantics allow. Only a calibrated probability
+        is a percentage; a raw model score or a heuristic severity printed as
+        "62%" would read as a likelihood it is not.
+        """
+        semantics = semantics or "HEURISTIC_SEVERITY"
+        if semantics == "NOT_APPLICABLE" or value is None:
+            return "none (no observation)"
+        if semantics == "CALIBRATED_PROBABILITY":
+            calibration = metadata.get("calibration") or {}
+            fitted = calibration.get("fitted_on") or {}
+            return (
+                f"`{value:.1%}` calibrated probability (Platt, "
+                f"{fitted.get('split', 'validation')} split, n="
+                f"{fitted.get('positives', '?')}+{fitted.get('negatives', '?')}; raw "
+                f"`{calibration.get('raw_score')}`)"
+            )
+        label = "raw model score, not a probability" if semantics == "RAW_MODEL_SCORE" else (
+            "heuristic severity, ordinal only"
+        )
+        return f"`{value:.3f}` ({label})"
+
+    @staticmethod
     def _ai_generation_lines(ai: Dict[str, Any]) -> list[str]:
         """
         The AI-generation branch, rendered apart from the manipulation verdict.
@@ -321,10 +359,32 @@ class ReportGenerator:
             f"- **Status:** `{status}`",
         ]
         if ai.get("score") is not None:
+            calibration = ai.get("calibration") or {}
+            if calibration.get("applied"):
+                fitted = calibration.get("fitted_on") or {}
+                kind = (
+                    f"calibrated probability: Platt scaling fitted on the "
+                    f"{fitted.get('split', 'validation')} split ({fitted.get('positives', '?')} "
+                    f"generated, {fitted.get('negatives', '?')} other), threshold set for a "
+                    f"{calibration.get('target_fpr', 0):.0%} false-positive rate; raw score "
+                    f"`{calibration.get('raw_score')}`"
+                )
+            else:
+                kind = "uncalibrated model score, not a probability"
             lines.append(
                 f"- **Score:** `{ai['score']:.3f}` against threshold "
-                f"`{ai.get('threshold')}` ({ai.get('detector')}; uncalibrated model "
-                "score, not a probability)"
+                f"`{ai.get('threshold')}` ({ai.get('detector')}; {kind})"
+            )
+        for entry in ai.get("detectors") or []:
+            if len(ai.get("detectors") or []) < 2:
+                break
+            score = entry.get("score")
+            lines.append(
+                f"  - {entry.get('detector')}: `{entry.get('status')}`"
+                + (f", score `{score:.3f}`" if score is not None else "")
+                + (f" ({entry['reason']})" if entry.get("reason") else "")
+                + (" — advisory: shown for reference, does not vote"
+                   if entry.get("voting") is False else "")
             )
         if ai.get("rationale"):
             lines.append(f"- **Rationale:** {ai['rationale']}")

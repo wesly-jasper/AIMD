@@ -7,8 +7,11 @@ Regression tests for pipeline-level truthfulness bugs.
     (every detector was described as INCONCLUSIVE)
   * the report is built after the analysis assessment is stored
     (every report said INCONCLUSIVE)
+  * evidence whose stored bytes changed after ingest is not analysed
 """
+import hashlib
 import uuid
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -33,10 +36,14 @@ def db():
 
 def _media(db, file_path="x.jpg") -> str:
     media_id = str(uuid.uuid4())
+    # The hash of the stored bytes, as ingest records it: the pipeline verifies
+    # it before analysing anything.
+    path = Path(file_path)
+    sha256 = hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else "0" * 64
     repo.create_media(db, {
         "id": media_id, "original_filename": "x.jpg", "stored_filename": "x.jpg",
         "file_path": str(file_path), "content_type": "image/jpeg",
-        "media_type": "image", "size_bytes": 1, "sha256": "0" * 64,
+        "media_type": "image", "size_bytes": 1, "sha256": sha256,
     })
     return media_id
 
@@ -164,6 +171,24 @@ def test_report_is_built_after_the_assessment_is_stored(db, tmp_path, monkeypatc
     pipeline.run(media_id, db)
 
     assert pipeline_module._plain_value(seen["assessment"]) == "SUSPICIOUS"
+
+
+def test_evidence_changed_after_ingest_is_not_analysed(db, tmp_path, monkeypatch):
+    image = tmp_path / "x.jpg"
+    image.write_bytes(b"\xff\xd8\xff")
+    media_id = _media(db, image)
+    image.write_bytes(b"\xff\xd8\xff\x00")  # altered in storage after ingest
+
+    pipeline = AnalysisPipeline.__new__(AnalysisPipeline)
+    ran = []
+    monkeypatch.setattr(pipeline, "_run_metadata", lambda *_a, **_k: ran.append(1))
+    monkeypatch.setattr(pipeline, "_finish_run", lambda *_a, **_k: None)
+
+    result = pipeline.run(media_id, db)
+
+    assert result["status"] == "FAILED"
+    assert "no longer matches the SHA-256" in result["error"]
+    assert ran == [], "no stage may run on evidence that failed its integrity check"
 
 
 # ── Evidence package ──────────────────────────────────────────────────────────

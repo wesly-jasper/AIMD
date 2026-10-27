@@ -39,3 +39,18 @@ def test_report_generator():
     assert "[INFERENCE]" in md_report
     assert "[UNCERTAINTY]" in md_report
     assert "abc123sha256" in md_report
+
+
+def test_scores_are_worded_by_their_semantics():
+    """Only a calibrated probability is a percentage; a raw score is not a likelihood."""
+    from app.services.evidence.report_generator import ReportGenerator
+
+    text = ReportGenerator._score_text
+    assert text(0.62, "RAW_MODEL_SCORE", {}) == "`0.620` (raw model score, not a probability)"
+    assert "%" not in text(0.62, "HEURISTIC_SEVERITY", {})
+    assert text(0.0, "NOT_APPLICABLE", {}) == "none (no observation)"
+    calibrated = text(0.12, "CALIBRATED_PROBABILITY", {
+        "calibration": {"raw_score": 0.4, "fitted_on": {"split": "val", "positives": 40, "negatives": 60}},
+    })
+    assert calibrated.startswith("`12.0%` calibrated probability")
+    assert "n=40+60" in calibrated and "raw `0.4`" in calibrated

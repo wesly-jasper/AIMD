@@ -125,7 +125,37 @@ export interface Segment {
   peak_score: number;
 }
 
-export type AiGenerationStatus = "AI_GENERATION_INDICATED" | "NOT_INDICATED" | "UNAVAILABLE";
+export type AiGenerationStatus =
+  | "AI_GENERATION_INDICATED"
+  | "NOT_INDICATED"
+  | "CONFLICTING"   // two generation detectors disagree; reported, not resolved
+  | "INCONCLUSIVE"  // ran, could not support a determination (e.g. video keyframes)
+  | "UNAVAILABLE";
+
+/** How a calibrated score was made: fitted on a validation split, recorded. */
+export interface ScoreCalibration {
+  applied: boolean;
+  probability?: number;
+  raw_score?: number;
+  threshold?: number;
+  target_fpr?: number;
+  method?: string;
+  reason?: string;
+  fitted_on?: { positives?: number; negatives?: number; split?: string; dataset_sha256?: string };
+  validation?: { fpr?: number; recall?: number };
+}
+
+/** One AI-generation detector's own result, when several ran. */
+export interface AiDetectorResult {
+  detector: string;
+  status: AiGenerationStatus;
+  score: number | null;
+  threshold: number | null;
+  score_semantics: ScoreSemantics;
+  reason: string | null;
+  /** false: shown for reference, outweighed by a more accurate detector. */
+  voting?: boolean;
+}
 
 /** The AI-generation branch: decided apart from the manipulation verdict. */
 export interface AiGeneration {
@@ -140,6 +170,8 @@ export interface AiGeneration {
   threshold?: number | null;
   rationale: string;
   reason?: string | null;
+  calibration?: ScoreCalibration | null;
+  detectors?: AiDetectorResult[];
 }
 
 export type VerificationStatus = "VERIFIED_MATCH" | "SIMILAR_UNVERIFIED" | "NO_MATCH" | string;

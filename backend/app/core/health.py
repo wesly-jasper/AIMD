@@ -13,7 +13,6 @@ unavailable detector as available is precisely the misrepresentation this platfo
 must not make, so the map is now derived or omitted -- never asserted.
 """
 import logging
-from functools import lru_cache
 from typing import Any
 
 from app.core.config import settings
@@ -75,60 +74,95 @@ def univfd_configuration_status() -> str:
     return "model_missing"
 
 
-@lru_cache(maxsize=1)
-def _registered_image_detectors() -> tuple[str, ...]:
+def _image_detectors() -> list:
     """
-    Class names of the image detectors the container constructs.
-
-    Computed once per process. Building the container loads MediaPipe and the
-    other detectors -- about 0.7 s of CPU -- and this sits behind the one
-    unauthenticated route, so doing it per request let any anonymous caller buy
-    most of a core per probe. The set only changes with configuration, which
-    requires a restart anyway. A construction failure raises and is therefore
-    not cached: the next probe retries.
+    The image detectors the pipeline actually uses -- the process-wide container,
+    not a second copy. Building a separate router here loaded every model twice.
+    A construction failure raises and is not cached: the next probe retries.
     """
-    from app.services.detection.detection_container import create_detection_router
+    from app.services.detection.detection_container import get_detection_container
 
-    engine = create_detection_router().image_engine
-    return tuple(sorted(type(d).__name__ for d in getattr(engine, "detectors", [])))
+    engine = get_detection_container().router.image_engine
+    return list(getattr(engine, "detectors", []))
+
+
+def detector_operational_status(detectors: list) -> dict[str, Any]:
+    """
+    Per detector: whether it can run (``availability``) and what its runs since
+    startup actually did (``state``: OPERATIONAL, DEGRADED, FAILING, UNTESTED,
+    UNAVAILABLE). Reasons are scrubbed: this route is unauthenticated.
+    """
+    from app.core.safe_errors import scrub
+    from app.schemas.detection import DetectorAvailability
+    from app.services.detection.runtime import detector_health
+
+    report: dict[str, Any] = {}
+    for detector in detectors:
+        name = type(detector).__name__
+        try:
+            availability, reason = detector.availability()
+        except Exception as exc:
+            availability, reason = DetectorAvailability.UNAVAILABLE, type(exc).__name__
+        runs = detector_health.snapshot(name)
+        report[name] = {
+            "state": detector_health.state(
+                name, availability, failing_after=settings.detector_failing_after
+            ),
+            "availability": availability.value,
+            "reason": scrub(reason),
+            "runs": runs.get("runs", 0),
+            "failed": runs.get("failed", 0),
+            "timeouts": runs.get("timeouts", 0),
+            "consecutive_failures": runs.get("consecutive_failures", 0),
+            "last_status": runs.get("last_status"),
+            "last_reason": scrub(runs.get("last_reason")),
+            "last_run_at": runs.get("last_run_at"),
+            "last_success_at": runs.get("last_success_at"),
+            "p95_duration_ms": runs.get("p95_duration_ms"),
+        }
+    return report
 
 
 def detector_report() -> dict[str, Any]:
     """
-    Describe the detector set that is actually constructed.
+    Describe the detector set that is actually constructed, and how it is doing.
 
-    Registration is not availability: a registered detector may still return
-    UNAVAILABLE at call time. That distinction is reported explicitly rather than
-    being collapsed into a single misleading status.
+    Registration is not availability, and availability is not operation: a
+    detector whose checkpoint is present can still fail on every request.
+    ``detectors`` reports all three, so a detector that is configured but broken
+    shows as FAILING instead of "configured".
     """
-    registered: list[str] = []
+    detectors: list = []
     registry_status = "ok"
     try:
-        registered = list(_registered_image_detectors())
+        detectors = _image_detectors()
     except Exception as exc:
         logger.error("Health check: detector registry failed (%s)", type(exc).__name__)
         registry_status = f"error: {type(exc).__name__}"
 
+    operational = detector_operational_status(detectors)
+    failing = sorted(n for n, d in operational.items() if d["state"] == "FAILING")
     return {
         "registry_status": registry_status,
         "trufor": trufor_configuration_status(),
         "univfd": univfd_configuration_status(),
-        "registered_image_detectors": registered,
-        # Per-detector availability reporting requires the detector availability
-        # contract (roadmap Phase 2). Until then this is stated as absent rather
-        # than guessed.
-        "availability_introspection": "NOT_IMPLEMENTED",
+        "registered_image_detectors": sorted(operational),
+        "detectors": operational,
+        "failing_detectors": failing,
     }
 
 
 def build_health_report() -> dict[str, Any]:
     db_status = check_database()
-    healthy = db_status == "ok"
+    detectors = detector_report()
+    # A detector failing on every request degrades the service even though the
+    # process is up: analyses complete, but without that detector's evidence.
+    healthy = db_status == "ok" and not detectors["failing_detectors"]
 
     return {
         "status": "ok" if healthy else "degraded",
         "version": settings.app_version,
         "database": db_status,
         "health": "healthy" if healthy else "degraded",
-        "detectors": detector_report(),
+        "detectors": detectors,
     }

@@ -123,7 +123,7 @@ class CopyMoveDetector(BaseDetector):
         except Exception as e:
             logger.warning(f"CopyMoveDetector failed: {e}")
             # AVAILABLE + FAILED: SIFT/ORB are present and the run broke.
-            return self.failed(f"Copy-move analysis failed: {type(e).__name__}")
+            return self.failed_from("Copy-move analysis failed", e)
 
     def _match_descriptors(
         self, descriptors: np.ndarray, keypoints: List[cv2.KeyPoint]

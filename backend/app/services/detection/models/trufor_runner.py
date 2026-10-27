@@ -253,6 +253,12 @@ class TruForRunner:
         # One forward pass at a time: the OOM fallback moves the model between
         # devices, and a shared runner may be called from several workers.
         self._lock = threading.Lock()
+        #: How long a call waits for another one to finish before giving up.
+        self.lock_timeout_s = 300.0
+        #: Times the model was found split across devices and moved back, and
+        #: times it had to be reloaded from disk. Reported in ``identity``.
+        self.recoveries = 0
+        self.reloads = 0
 
     # ── Identity ─────────────────────────────────────────────────────────────
 
@@ -269,6 +275,8 @@ class TruForRunner:
             "model_file": self.checkpoint_path.name if self.checkpoint_path else None,
             "checkpoint_sha256": self.checkpoint_sha256,
             "weights_verification": self.weights_verification,
+            "device_recoveries": self.recoveries,
+            "reloads": self.reloads,
         }
 
     # ── Loading ──────────────────────────────────────────────────────────────
@@ -446,17 +454,68 @@ class TruForRunner:
                 return pred, conf, det, 1
             return self._forward_tiled(tensor, device)
 
+    # ── Recovery ─────────────────────────────────────────────────────────────
+    #
+    # The out-of-memory fallback moves the model to the CPU and back. When the
+    # move back itself ran out of memory, the model was left with some tensors on
+    # each device, and every later call raised -- including on images that had
+    # passed earlier -- until the process was restarted (RELIABILITY_REPORT.md
+    # section 4, item 3). Each call now starts from a model that is wholly on its
+    # device, moving or reloading it first if it is not.
+
+    def _on_one_device(self) -> bool:
+        assert self.model is not None
+        expected = self.device.type
+        tensors = list(self.model.parameters()) + list(self.model.buffers())
+        return all(t.device.type == expected for t in tensors)
+
+    def _restore(self) -> None:
+        """Put the model back wholly on its device: move it, or reload it from disk."""
+        if self.model is None or self._on_one_device():
+            return
+        logger.warning("TruFor model is split across devices; moving it back to %s", self.device)
+        try:
+            if self.device.type == "cuda":
+                torch.cuda.empty_cache()
+            self.model.to(self.device)
+            if self._on_one_device():
+                self.recoveries += 1
+                return
+        except Exception:
+            logger.warning("Moving TruFor back to %s failed; reloading it", self.device, exc_info=True)
+        self._reload()
+
+    def _reload(self) -> None:
+        """Discard the model and load it again from the verified checkpoint."""
+        self.model = None
+        self.loaded = False
+        if self.device.type == "cuda":
+            torch.cuda.empty_cache()
+        self.load()
+        self.reloads += 1
+        logger.warning("TruFor reloaded after an unrecoverable device state")
+
     def _infer(
         self, tensor: torch.Tensor
     ) -> tuple[np.ndarray, np.ndarray, float, str, bool, int]:
         """Run on the configured device; on CUDA out-of-memory, once more on the CPU."""
-        assert self.model is not None
-        with self._lock:
+        # Bounded: a run that hung inside the lock would otherwise make every
+        # later request wait forever behind it.
+        if not self._lock.acquire(timeout=self.lock_timeout_s):
+            raise TimeoutError("TruFor is busy with another image")
+        try:
+            self._restore()
+            assert self.model is not None
             try:
                 pred, conf, det, tiles = self._run(tensor, self.device)
                 device_used, oom_fallback = str(self.device), False
-            except torch.cuda.OutOfMemoryError:
-                if self.device.type != "cuda":
+            except RuntimeError as exc:
+                # Windows reports some CUDA allocation failures as a plain
+                # RuntimeError rather than OutOfMemoryError.
+                if self.device.type != "cuda" or not (
+                    isinstance(exc, torch.cuda.OutOfMemoryError)
+                    or "out of memory" in str(exc).lower()
+                ):
                     raise
                 logger.warning("TruFor ran out of GPU memory; retrying on the CPU")
                 torch.cuda.empty_cache()
@@ -465,14 +524,20 @@ class TruForRunner:
                 try:
                     pred, conf, det, tiles = self._run(tensor, cpu)
                 finally:
-                    self.model.to(self.device)
+                    try:
+                        self.model.to(self.device)
+                    except Exception:
+                        # Left for _restore on the next call, which reloads it
+                        # if moving it is still impossible. This result is good.
+                        logger.warning("TruFor could not move back to %s", self.device, exc_info=True)
                 device_used, oom_fallback = "cpu", True
-            finally:
-                # Blocks cached for one image's shapes fragment the next one's:
-                # a 1024x768 pass followed by a tiled 1080p one reserved 3.7 GB
-                # instead of 3.1 GB, past what a 4 GB card has free.
-                if self.device.type == "cuda":
-                    torch.cuda.empty_cache()
+        finally:
+            # Blocks cached for one image's shapes fragment the next one's:
+            # a 1024x768 pass followed by a tiled 1080p one reserved 3.7 GB
+            # instead of 3.1 GB, past what a 4 GB card has free.
+            if self.device.type == "cuda":
+                torch.cuda.empty_cache()
+            self._lock.release()
         localization = torch.softmax(pred.squeeze(0), dim=0)[1].numpy()
         reliability = torch.sigmoid(conf.squeeze(0))[0].numpy()
         score = float(torch.sigmoid(det).reshape(-1)[0].item())

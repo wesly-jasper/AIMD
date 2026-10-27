@@ -51,7 +51,7 @@ from app.services.sources.connectors import SourceQuery
 from app.services.provenance.graph import build_provenance_graph
 from app.services.evidence.evidence_service import EvidenceService
 from app.services.evidence.report_generator import ReportGenerator
-from app.services.detection.detection_container import DetectionContainer
+from app.services.detection.detection_container import get_detection_container
 
 logger = logging.getLogger(__name__)
 
@@ -97,6 +97,10 @@ _CONFIG_SNAPSHOT_KEYS = (
 
 def _plain_value(raw: Any) -> str:
     return raw.value if hasattr(raw, "value") else str(raw)
+
+
+class EvidenceIntegrityError(RuntimeError):
+    """The stored evidence does not match what was ingested."""
 
 
 @dataclass(frozen=True)
@@ -152,7 +156,7 @@ class AnalysisPipeline:
         self._source_connectors = default_source_connectors()
         self._evidence_service = EvidenceService()
         self._report_generator = ReportGenerator()
-        self._detection_container = DetectionContainer()
+        self._detection_container = get_detection_container()
 
     def run(
         self, media_id: str, db: Session, requested_by: Optional[str] = None,
@@ -190,6 +194,12 @@ class AnalysisPipeline:
         stage_failures: list[str] = []
 
         try:
+            # ── Stage 0: Chain of custody ─────────────────────────────────────
+            # The stored file must still be the bytes that were ingested. An
+            # analysis of a file that changed after upload describes different
+            # evidence, so it fails here rather than reporting on it.
+            self._verify_integrity(file_path, media)
+
             # ── Stage 1: Metadata extraction ──────────────────────────────────
             logger.info("[%s] Stage 1: Metadata extraction", analysis_id)
             metadata = self._run_metadata(file_path, media_id, db, stage_failures)
@@ -293,6 +303,25 @@ class AnalysisPipeline:
             }
 
     # ── Stage implementations ─────────────────────────────────────────────────
+
+    @staticmethod
+    def _verify_integrity(file_path: Path, media) -> None:
+        """Raise when the stored file no longer hashes to the SHA-256 recorded at ingest."""
+        expected = (getattr(media, "sha256", None) or "").lower()
+        if not expected:
+            raise EvidenceIntegrityError(
+                "No SHA-256 was recorded for this evidence at ingest, so its "
+                "integrity cannot be verified"
+            )
+        digest = hashlib.sha256()
+        with file_path.open("rb") as handle:
+            while chunk := handle.read(1024 * 1024):
+                digest.update(chunk)
+        if digest.hexdigest() != expected:
+            raise EvidenceIntegrityError(
+                "The stored evidence file no longer matches the SHA-256 recorded "
+                "at ingest; it was not analysed"
+            )
 
     def _run_metadata(
         self,
@@ -1019,51 +1048,146 @@ class AnalysisPipeline:
                              "this image was generated was not assessed.",
             }
 
-        det = dets[0]
+        # Every generation detector is read, not just the first: a second model
+        # that disagrees is evidence about how far either can be trusted, and
+        # it is reported rather than averaged or outvoted.
+        entries = [AnalysisPipeline._ai_entry(d) for d in dets]
+        scored = [e for e in entries if e["status"] in ("AI_GENERATION_INDICATED", "NOT_INDICATED")]
+        undetermined = [e for e in entries if e["status"] == "INCONCLUSIVE"]
+        if not scored and undetermined:
+            first = undetermined[0]
+            return {
+                **first["base"],
+                "status": "INCONCLUSIVE",
+                "reason": first["reason"],
+                "rationale": first["rationale"],
+                "detectors": [e["public"] for e in entries],
+            }
+        if not scored:
+            first = entries[0]
+            return {
+                **first["base"],
+                "status": "UNAVAILABLE",
+                "reason": first["reason"],
+                "rationale": first["rationale"],
+                "detectors": [e["public"] for e in entries],
+            }
+
+        # An advisory detector is shown but does not vote while a stronger one
+        # on the branch has scored (settings.ai_generation_advisory_detectors).
+        advisory = set(settings.ai_generation_advisory_detectors or ())
+        voting = [e for e in scored if e["detector"] not in advisory] or scored
+        for e in entries:
+            e["public"]["voting"] = e in voting
+        scored = voting
+
+        indicated = [e for e in scored if e["status"] == "AI_GENERATION_INDICATED"]
+        cleared = [e for e in scored if e["status"] == "NOT_INDICATED"]
+        primary = max(indicated, key=lambda e: e["score"]) if indicated else scored[0]
+        result = {
+            **primary["base"],
+            "score": primary["score"],
+            "logit": primary["logit"],
+            "threshold": primary["threshold"],
+            "calibration": primary["calibration"],
+            "detectors": [e["public"] for e in entries],
+        }
+        if indicated and cleared:
+            return {
+                **result,
+                "status": "CONFLICTING",
+                "rationale": (
+                    f"The AI-generation detectors disagree: "
+                    f"{', '.join(e['detector'] for e in indicated)} indicated generation, "
+                    f"{', '.join(e['detector'] for e in cleared)} did not. The "
+                    "disagreement is reported, not resolved; neither result "
+                    "supports a conclusion on its own."
+                ),
+            }
+        rationale = primary["rationale"]
+        if len(scored) > 1:
+            rationale += f" {len(scored)} AI-generation detectors agree."
+        shown = [e["detector"] for e in entries if e not in scored and e["status"] != "UNAVAILABLE"]
+        if shown:
+            rationale += (
+                f" {', '.join(shown)} is also shown for reference; it does not "
+                "vote, being markedly less accurate on the evaluation set."
+            )
+        return {**result, "status": primary["status"], "rationale": rationale}
+
+    @staticmethod
+    def _ai_entry(det) -> dict:
+        """One AI-generation detector's result, with its own wording."""
         meta = getattr(det, "detector_metadata", None) or {}
+        semantics = _plain_value(det.score_semantics)
         base = {
             "detector": det.detector,
             "detector_version": getattr(det, "detector_version", None),
-            "score_semantics": _plain_value(det.score_semantics),
+            "score_semantics": semantics,
             "semantics": meta.get("semantics"),
             "limitations": list(meta.get("limitations") or []),
         }
-        if observation_polarity(det) is None or _plain_value(det.execution_status) != "COMPLETED":
-            return {
-                **base,
-                "status": "UNAVAILABLE",
-                "reason": det.status_reason,
-                "rationale": f"{det.detector} did not produce a score "
-                             f"({_plain_value(det.availability)}/"
-                             f"{_plain_value(det.execution_status)}), so whether "
-                             "this image was generated was not assessed.",
-            }
-
-        score = float(det.confidence)
-        threshold = meta.get("threshold")
-        indicated = bool(det.manipulation_detected)
-        common = {
-            **base,
-            "score": score,
-            "logit": meta.get("logit"),
-            "threshold": threshold,
+        entry = {"detector": det.detector, "base": base, "reason": det.status_reason,
+                 "score": None, "logit": None, "threshold": None, "calibration": None}
+        if observation_polarity(det) is not None and _plain_value(det.execution_status) == "INCONCLUSIVE":
+            # Ran, and could not support a determination -- e.g. no keyframe of
+            # a video flagged, which is not a finding about the frames between.
+            entry.update(
+                status="INCONCLUSIVE",
+                rationale=f"{det.detector} ran but could not support a determination"
+                          + (f": {det.status_reason}." if det.status_reason else "."),
+            )
+        elif observation_polarity(det) is None or _plain_value(det.execution_status) != "COMPLETED":
+            entry.update(
+                status="UNAVAILABLE",
+                rationale=f"{det.detector} did not produce a score "
+                          f"({_plain_value(det.availability)}/"
+                          f"{_plain_value(det.execution_status)}), so whether "
+                          "this image was generated was not assessed.",
+            )
+        else:
+            score = float(det.confidence)
+            threshold = meta.get("threshold")
+            calibration = meta.get("calibration")
+            calibrated = semantics == "CALIBRATED_PROBABILITY" and (calibration or {}).get("applied")
+            if calibrated:
+                fitted = calibration.get("fitted_on") or {}
+                how = (
+                    f"a calibrated probability (Platt scaling on "
+                    f"{fitted.get('positives', '?')} generated and "
+                    f"{fitted.get('negatives', '?')} other validation images, threshold "
+                    f"set for a {calibration.get('target_fpr'):.0%} false-positive rate)"
+                )
+            else:
+                how = "an uncalibrated score"
+            indicated = bool(det.manipulation_detected)
+            if indicated:
+                rationale = (
+                    f"{det.detector} scored {score:.3f}, at or above its threshold of "
+                    f"{threshold}. This is {how}, and supports examiner review, not a "
+                    "conclusion."
+                )
+            else:
+                rationale = (
+                    f"{det.detector} scored {score:.3f}, below its threshold of "
+                    f"{threshold} ({how}). This is not a finding that the image was "
+                    "captured by a camera: generators this detector was not trained "
+                    "on can score low."
+                )
+            entry.update(
+                status="AI_GENERATION_INDICATED" if indicated else "NOT_INDICATED",
+                score=score, logit=meta.get("logit"), threshold=threshold,
+                calibration=calibration, rationale=rationale,
+            )
+        entry["public"] = {
+            "detector": det.detector,
+            "status": entry["status"],
+            "score": entry["score"],
+            "threshold": entry["threshold"],
+            "score_semantics": semantics,
+            "reason": det.status_reason if entry["status"] in ("UNAVAILABLE", "INCONCLUSIVE") else None,
         }
-        if indicated:
-            return {
-                **common,
-                "status": "AI_GENERATION_INDICATED",
-                "rationale": f"{det.detector} scored {score:.3f}, at or above its "
-                             f"threshold of {threshold}. The score is uncalibrated "
-                             "and supports examiner review, not a conclusion.",
-            }
-        return {
-            **common,
-            "status": "NOT_INDICATED",
-            "rationale": f"{det.detector} scored {score:.3f}, below its threshold "
-                         f"of {threshold}. This is not a finding that the image "
-                         "was captured by a camera: generators this detector was "
-                         "not trained on can score low.",
-        }
+        return entry
 
     # ── Forensic record: observations -> finding -> assessment ────────────────
 

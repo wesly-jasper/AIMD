@@ -81,8 +81,16 @@ class FingerprintService:
         self.hash_generator = HashGenerator()
         self._embedder = embedder
         self._embedder_resolved = embedder is not None or not default_embedder
+        self._uses_shared_embedder = embedder is None and default_embedder
 
     def _get_embedder(self) -> Any | None:
+        if self._uses_shared_embedder:
+            from app.core.config import settings
+
+            # Checked on every call, not only the first: turning embeddings off
+            # must take effect even after the backbone was resolved once.
+            if not settings.similarity_embedding_enabled:
+                return None
         if not self._embedder_resolved:
             self._embedder = _default_embedder()
             self._embedder_resolved = True

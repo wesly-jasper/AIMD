@@ -27,6 +27,7 @@ from app.api.v1.endpoints.analysis import router as analysis_router
 from app.api.v1.endpoints.auth import router as auth_router
 from app.api.v1.endpoints.cases import router as cases_router
 from app.api.v1.endpoints.audit import router as audit_router
+from app.api.v1.endpoints.system import router as system_router
 
 setup_logging(settings.log_level)
 logger = logging.getLogger("aimd")
@@ -133,6 +134,7 @@ app.include_router(media_router, prefix="/api/v1", dependencies=authenticated)
 app.include_router(analysis_router, prefix="/api/v1", dependencies=authenticated)
 app.include_router(cases_router, prefix="/api/v1", dependencies=authenticated)
 app.include_router(audit_router, prefix="/api/v1", dependencies=authenticated)
+app.include_router(system_router, prefix="/api/v1", dependencies=authenticated)
 
 
 @app.get("/health", tags=["System"])

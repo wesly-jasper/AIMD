@@ -66,6 +66,7 @@ requests>=2.31
 
 # --- Utilities ---------------------------------------------------------------
 python-dotenv>=1.0
+psutil>=5.9                  # free-memory check before loading a large model
 
 # --- Testing -----------------------------------------------------------------
 pytest>=8.1

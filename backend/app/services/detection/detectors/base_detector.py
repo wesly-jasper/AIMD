@@ -135,6 +135,22 @@ class BaseDetector(ABC):
             media_type,
         )
 
+    def failed_from(
+        self, context: str, exc: BaseException, *, media_type: Optional[str] = None
+    ) -> DetectionResult:
+        """
+        ``failed`` for a caught exception: the exception class in the reason, and
+        an out-of-memory failure marked as such so the engine can retry it once.
+        The message itself is logged, not recorded -- it can carry file paths.
+        """
+        from app.services.detection.runtime import is_memory_error
+
+        memory = is_memory_error(exc)
+        reason = f"{context}: {type(exc).__name__}" + (" (out of memory)" if memory else "")
+        result = self.failed(reason, media_type=media_type)
+        result.metadata["memory_error"] = memory
+        return result
+
     def skipped(
         self, reason: str, *, media_type: Optional[str] = None
     ) -> DetectionResult:

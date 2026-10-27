@@ -82,6 +82,18 @@ class Settings(BaseSettings):
     univfd_model_path: Optional[Path] = None
     # Applied to sigmoid(logit), an uncalibrated model score; 0.5 is the paper's.
     univfd_threshold: float = 0.5
+    # B-Free AI-generation detector (CVPR 2025): a second, independent model on
+    # the same branch. scripts/fetch_bfree.py installs it into backend/models/bfree.
+    # Research / non-profit licence. Applied to sigmoid(logit); 0.5 = logit > 0.
+    bfree_enabled: bool = False
+    bfree_model_path: Optional[Path] = None
+    bfree_threshold: float = 0.5
+    # AI-generation detectors that are reported but do not vote while another
+    # detector on the branch produced a score. UnivFD: on the evaluation test
+    # split (2026-10-27) it found 4/55 generated images (AUC 0.63) and flagged
+    # 13/36 edited photographs, so its disagreement with B-Free (38/55, 6/36)
+    # turned 105/331 verdicts into CONFLICTING noise. Alone, it still votes.
+    ai_generation_advisory_detectors: List[str] = ["UnivFDDetector"]
     # Root certificates a Content Credentials signer must chain to for TRUSTED:
     # the official C2PA Trust List, installed by scripts/fetch_c2pa_trust_list.py.
     # Without it, intact manifests can only be VALID (signer not checked).
@@ -155,6 +167,30 @@ class Settings(BaseSettings):
     max_audio_duration_seconds: int = 600
     max_image_dimension: int = 8000
     processing_timeout_seconds: int = 600
+
+    # ── Detector reliability ─────────────────────────────────────────────────
+    # A detector that has not returned after this long is recorded FAILED
+    # ("timed out") and the analysis moves on; a hung detector previously held
+    # the whole request. The slowest healthy 960 px run measured 53 s.
+    detector_timeout_seconds: float = 180.0
+    # Retry a detector once after an out-of-memory failure, having released
+    # cached memory first. Never for other errors: a deterministic crash would
+    # only fail twice.
+    detector_retry_on_memory_error: bool = True
+    # Free system memory a large model needs before it is loaded. Loading CLIP
+    # with ~3 GB free crashed the process outright (access violation inside
+    # torch), which no exception handler can catch, so the check comes first.
+    model_load_min_free_mb: int = 2048
+    # Consecutive failed runs after which /health reports a detector FAILING.
+    detector_failing_after: int = 3
+    # calibration.json written by `scripts/evaluate.py calibrate`. Applied only
+    # to the exact detector version it was fitted for; unset = raw scores.
+    calibration_path: Optional[Path] = None
+    # Let flagged video keyframes set the video-level verdict. Off: on the
+    # evaluation set (80 clips, 2026-10-27) the keyframe rule flagged 3/20
+    # genuine clips and 10/60 manipulated ones -- false positives with no
+    # recall gain. Flagged frames are still reported for review either way.
+    video_keyframe_verdicts_enabled: bool = False
 
     # ── Security / App ────────────────────────────────────────────────────────
     # Controls whether a missing JWT signing key is fatal; see app.core.auth.

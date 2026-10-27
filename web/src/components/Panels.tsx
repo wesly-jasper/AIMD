@@ -22,8 +22,26 @@ export function Unavailable({ children }: { children: React.ReactNode }) {
 const AI_STATUS: Record<AiGeneration["status"], { label: string; tone: string }> = {
   AI_GENERATION_INDICATED: { label: "Indicated", tone: "warn" },
   NOT_INDICATED: { label: "Not indicated", tone: "" },
+  CONFLICTING: { label: "Detectors disagree", tone: "warn" },
+  INCONCLUSIVE: { label: "Inconclusive", tone: "hollow" },
   UNAVAILABLE: { label: "Unavailable", tone: "hollow" },
 };
+
+/** "Calibrated: 1.2% at a 5% FPR target, fitted on 40 + 60 validation images." */
+function CalibrationNote({ ai }: { ai: AiGeneration }) {
+  const c = ai.calibration;
+  if (!c) return null;
+  if (!c.applied) return <p className="sub">Not calibrated for this model version: {c.reason}</p>;
+  const fitted = c.fitted_on ?? {};
+  return (
+    <p className="sub">
+      Calibrated on {fitted.positives ?? "?"} generated and {fitted.negatives ?? "?"} other images
+      ({fitted.split ?? "validation"} split); the threshold holds the false-positive rate at or
+      under {c.target_fpr != null ? `${Math.round(c.target_fpr * 100)}%` : "its target"} on that set.
+      Raw score {c.raw_score != null ? c.raw_score.toFixed(3) : "—"}.
+    </p>
+  );
+}
 
 function Limitations({ items }: { items: string[] }) {
   if (items.length === 0) return null;
@@ -38,8 +56,11 @@ function Limitations({ items }: { items: string[] }) {
 /** Detection ids in the AI-generation branch, so the manipulation card leaves them out. */
 export function aiDetectionIds(d: AnalysisDetail): Set<string> {
   const ids = new Set(d.observations.filter((o) => o.signal_family === "ai_generation").map((o) => o.detection_id));
-  const name = d.ai_generation?.detector;
-  if (name) d.detections.filter((x) => x.detector === name).forEach((x) => ids.add(x.id));
+  const names = new Set([
+    d.ai_generation?.detector,
+    ...(d.ai_generation?.detectors ?? []).map((x) => x.detector),
+  ].filter(Boolean));
+  d.detections.filter((x) => names.has(x.detector)).forEach((x) => ids.add(x.id));
   return ids;
 }
 
@@ -110,6 +131,8 @@ export function BranchCards({ d }: { d: AnalysisDetail }) {
           <Unavailable>This analysis was recorded before the AI-generation check existed.</Unavailable>
         ) : ai.status === "UNAVAILABLE" ? (
           <Unavailable>{ai.rationale}{ai.reason && ai.reason !== "image_only" ? ` Reason: ${ai.reason}` : ""}</Unavailable>
+        ) : ai.status === "INCONCLUSIVE" ? (
+          <p className="branch-rationale">{ai.rationale}</p>
         ) : (
           <>
             <p className="branch-rationale">{ai.rationale}</p>
@@ -129,6 +152,21 @@ export function BranchCards({ d }: { d: AnalysisDetail }) {
               {ai.score_semantics ? SEMANTICS[ai.score_semantics] : "not stated"}
               {ai.semantics ? ` — ${ai.semantics}` : ""}
             </p>
+            <CalibrationNote ai={ai} />
+          </>
+        )}
+        {ai?.detectors && ai.detectors.length > 1 && (
+          <>
+            <h4 className="branch-sub">Each detector</h4>
+            <ul className="semantics-list">
+              {ai.detectors.map((x) => (
+                <li key={x.detector}>
+                  <span>{checkName(x.detector)}</span>
+                  <span className="num">{x.score != null ? score(x.score, x.score_semantics) : "—"}</span>
+                  <span className="sub-inline">{AI_STATUS[x.status].label}{x.reason ? ` — ${x.reason}` : ""}{x.voting === false ? " · for reference, does not count" : ""}</span>
+                </li>
+              ))}
+            </ul>
           </>
         )}
         <Limitations items={ai?.limitations ?? []} />
