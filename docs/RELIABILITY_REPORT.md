@@ -216,6 +216,13 @@ UnivFD missed 93% of generated images in §4.2, so Phase 2 screened a replacemen
 
 Validation agrees: recall 74%, FPR 8%, AUC 0.92.
 
+**Reproduced from a clean commit.** The full pipeline was rerun on all 502 files: run `phase2-clean`, commit `9a0f8e5` with no uncommitted changes, dataset `0331254dec71`, with `BFREE_ENABLED=true` and UnivFD advisory, all recorded in `run.json`.
+- **AI branch on test:** recall 38/55, FPR 6/174, balanced accuracy 0.83. This matches the screening run exactly.
+- **Manipulation branch:** unchanged (recall 60/138, FPR 10/138).
+- **Operations:** 0 run errors and 0 silent failures.
+
+That run also showed the branch's "score AUC" had still been computed from UnivFD's score. It now uses the detector that decides the branch: B-Free, 0.86 on test.
+
 The intervals for recall and AUC don't overlap, and B-Free's false positives fall, especially on edited photos. **This is a real improvement by the plan's criterion.**
 
 **By generator (recall):**

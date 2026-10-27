@@ -31,6 +31,7 @@ BACKEND = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(BACKEND))
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
+from app.services.evaluation import holdout  # noqa: E402
 from app.services.evaluation.dataset import (  # noqa: E402
     assign_splits,
     load_manifest,
@@ -49,7 +50,15 @@ def _pct(value) -> str:
 def cmd_split(args) -> int:
     items = load_manifest(args.manifest)
     fractions = {k: v for k, v in (("train", args.train), ("val", args.val), ("test", args.test)) if v}
-    assign_splits(items, fractions, seed=args.seed, by_generator=args.by_generator, overwrite=True)
+    # A frozen holdout file stays in the holdout whatever the new fractions say.
+    lock = holdout.load_lock(args.lock)
+    locked = [i for i in items if holdout.is_locked(i, lock)]
+    assign_splits([i for i in items if i not in locked], fractions,
+                  seed=args.seed, by_generator=args.by_generator, overwrite=True)
+    for item in locked:
+        item.split = "holdout"
+    if locked:
+        print(f"{len(locked)} frozen holdout files kept in the holdout")
     problems = validate(items)
     if problems:
         print("\n".join(problems[:20]))
@@ -94,6 +103,18 @@ def cmd_run(args) -> int:
     if problems:
         print("Dataset problems:\n  " + "\n  ".join(problems[:20]))
         return 1
+    lock = holdout.load_lock(args.lock)
+    evaluates_holdout = any(i.split == "holdout" for i in items)
+    if evaluates_holdout and lock is None:
+        print("holdout items but no lock: freeze the holdout first (evaluate.py freeze)")
+        return 1
+    if lock:
+        # Also for runs without holdout items: a locked file relabelled as val
+        # or test would let a later fit see the holdout.
+        problems = holdout.check(items, lock)
+        if problems:
+            print("Holdout does not match its lock:\n  " + "\n  ".join(problems[:20]))
+            return 1
 
     def progress(n, total, rec):
         v = rec.get("verdicts", {})
@@ -105,7 +126,29 @@ def cmd_run(args) -> int:
         )
 
     path = run_evaluation(items, args.out, engine=engine, progress=progress)
+    if evaluates_holdout:
+        info_path = Path(args.out) / "run.json"
+        info = json.loads(info_path.read_text(encoding="utf-8"))
+        info["holdout_lock"] = {"holdout_sha256": lock["holdout_sha256"], "count": lock["count"],
+                                "frozen_at": lock["frozen_at"]}
+        info_path.write_text(json.dumps(info, indent=2), encoding="utf-8")
     print(f"predictions: {path}")
+    return 0
+
+
+def cmd_freeze(args) -> int:
+    lock_path = Path(args.lock or holdout.DEFAULT_LOCK)
+    if lock_path.exists() and not args.replace:
+        print(f"{lock_path} exists. A holdout is frozen once: replacing it means every "
+              "result reported on the old one stops being a holdout result. Use --replace "
+              "only for a new benchmark version, and say so in the report.")
+        return 1
+    items = [item for path in args.manifests for item in load_manifest(path)]
+    lock = holdout.build_lock(items, note=args.note)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path.write_text(json.dumps(lock, indent=1), encoding="utf-8")
+    print(f"froze {lock['count']} holdout files {lock['labels']} -> {lock_path}")
+    print(f"holdout_sha256 {lock['holdout_sha256']}. Commit the lock with the code.")
     return 0
 
 
@@ -127,7 +170,7 @@ def _print_report(report) -> None:
         print(f"  precision          {_pct(b['precision'])}")
         print(f"  balanced accuracy  {b['balanced_accuracy']}")
         print(f"  abstained (pos/neg) {_pct(b['abstained_positive'])} / {_pct(b['abstained_negative'])}")
-        print(f"  score AUC          {b['score_auc']} {b['score_auc_ci95'] or ''}")
+        print(f"  score AUC          {b['score_auc']} {b['score_auc_ci95'] or ''} (score: {b.get('score_detector')})")
         for name, m in (b.get("per_detector") or {}).items():
             print(f"  [{name} on its own] recall {_pct(m['recall'])}  FPR {_pct(m['false_positive_rate'])}  "
                   f"balanced {m['balanced_accuracy']}  AUC {m['score_auc']} {m['score_auc_ci95'] or ''}")
@@ -151,6 +194,12 @@ def _print_report(report) -> None:
 
 def cmd_metrics(args) -> int:
     run_dir = Path(args.run)
+    if args.split == "holdout":
+        info = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+        lock = info.get("holdout_lock")
+        print(f"Frozen holdout, verified at run time against lock {lock['holdout_sha256'][:12]} "
+              f"({lock['count']} files, frozen {lock['frozen_at']})" if lock else
+              "WARNING: this run's holdout was not verified against a lock")
     report = _metrics(run_dir, args.split)
     target = run_dir / f"metrics.{args.split or 'all'}.json"
     target.write_text(json.dumps(report, indent=2), encoding="utf-8")
@@ -177,14 +226,23 @@ def cmd_compare(args) -> int:
 
 def cmd_calibrate(args) -> int:
     from app.services.detection import calibration
-    from app.services.evaluation.metrics import BRANCH_SCORE_DETECTOR
+    from app.services.evaluation.metrics import BRANCH_DETECTORS
     from app.services.evaluation.runner import load_predictions
 
     run_dir = Path(args.run)
+    if args.split == "holdout":
+        print("refused: nothing is fitted on the frozen holdout")
+        return 1
     records = [r for r in load_predictions(run_dir / "predictions.jsonl") if r.get("split") == args.split]
+    frozen = holdout.locked_ids(holdout.load_lock(args.lock))
+    leaked = [r["id"] for r in records if r["id"] in frozen]
+    if leaked:
+        print(f"refused: {len(leaked)} frozen holdout files are labelled {args.split!r} "
+              f"in this run (e.g. {leaked[0]})")
+        return 1
     info = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
     fitted = {}
-    for branch, detector in BRANCH_SCORE_DETECTOR.items():
+    for branch, detector in [(b, d) for b, ds in BRANCH_DETECTORS.items() for d in ds]:
         rows = [
             (r["detectors"][detector]["raw_score"], r["targets"][branch], r["detectors"][detector]["version"])
             for r in records
@@ -235,6 +293,7 @@ def main() -> int:
     p.add_argument("--seed", default="aimd-eval-v1")
     p.add_argument("--by-generator", action="store_true",
                    help="keep each AI generator wholly in one split")
+    p.add_argument("--lock", help="holdout lock (default backend/evaluation/holdout.lock.json)")
     p.set_defaults(func=cmd_split)
 
     p = sub.add_parser("run", help="predict every file")
@@ -243,7 +302,15 @@ def main() -> int:
     p.add_argument("--split", help="only this split")
     p.add_argument("--limit", type=int)
     p.add_argument("--only", help="comma-separated detector classes to run (screening)")
+    p.add_argument("--lock", help="holdout lock (default backend/evaluation/holdout.lock.json)")
     p.set_defaults(func=cmd_run)
+
+    p = sub.add_parser("freeze", help="freeze a manifest's holdout split into the committed lock")
+    p.add_argument("manifests", nargs="+")
+    p.add_argument("--lock", help="holdout lock (default backend/evaluation/holdout.lock.json)")
+    p.add_argument("--note", default="")
+    p.add_argument("--replace", action="store_true")
+    p.set_defaults(func=cmd_freeze)
 
     p = sub.add_parser("metrics", help="metrics for a run")
     p.add_argument("run")
@@ -261,6 +328,7 @@ def main() -> int:
     p.add_argument("--out", required=True)
     p.add_argument("--split", default="val")
     p.add_argument("--target-fpr", type=float, default=0.05)
+    p.add_argument("--lock", help="holdout lock (default backend/evaluation/holdout.lock.json)")
     p.set_defaults(func=cmd_calibrate)
 
     args = parser.parse_args()

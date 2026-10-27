@@ -10,7 +10,7 @@ A manifest is a JSON list (or JSON Lines) of items:
      "kind": "splice",                  # manipulation kind, or the generator
      "generator": "Midjourney",         # optional, for AI-generated items
      "mask": "cam_03.png",              # optional pixel mask (masks/)
-     "split": "test",                   # train | val | test (see assign_splits)
+     "split": "test",                   # train | val | test | holdout
      "tags": ["jpeg_q75"]}              # optional robustness conditions
 
 Splitting is by ``group``, never by file: an edited photo and its original in
@@ -28,7 +28,9 @@ from pathlib import Path
 from typing import Any, Iterable, Optional
 
 LABELS = ("real", "manipulated", "ai_generated")
-SPLITS = ("train", "val", "test")
+#: ``holdout`` is the frozen final test: listed in a committed lock file
+#: (``scripts/evaluate.py freeze``), never fitted on, never re-split.
+SPLITS = ("train", "val", "test", "holdout")
 
 
 @dataclass

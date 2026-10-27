@@ -171,8 +171,22 @@ def branch_rows(records: Iterable[dict[str, Any]], branch: str, detector: Option
     return rows
 
 
-#: The detector whose raw score is used for each branch's AUC.
-BRANCH_SCORE_DETECTOR = {"manipulation": "TruForDetector", "ai_generation": "UnivFDDetector"}
+#: Detectors whose raw score may stand for each branch's AUC, in order of
+#: preference: the one that decides the branch first. UnivFD is advisory once
+#: B-Free runs, and the branch AUC was still reported from UnivFD's score.
+BRANCH_SCORE_DETECTORS = {
+    "manipulation": ("TruForDetector",),
+    "ai_generation": ("BFreeDetector", "UnivFDDetector"),
+}
+
+
+def branch_score_detector(records: Iterable[dict[str, Any]], branch: str) -> Optional[str]:
+    """The first of ``BRANCH_SCORE_DETECTORS[branch]`` that scored anything in ``records``."""
+    records = list(records)
+    for detector in BRANCH_SCORE_DETECTORS[branch]:
+        if any((r.get("detectors") or {}).get(detector, {}).get("raw_score") is not None for r in records):
+            return detector
+    return None
 #: Every detector that answers each branch's question, measured on its own
 #: decision as well as through the branch verdict.
 BRANCH_DETECTORS = {
@@ -193,8 +207,10 @@ def compute_report(records: list[dict[str, Any]], *, split: Optional[str] = None
     report: dict[str, Any] = {"split": split or "all", "files": len(records)}
 
     for branch, (flagged, cleared) in BRANCH_VERDICTS.items():
-        rows = branch_rows(records, branch, BRANCH_SCORE_DETECTOR[branch])
+        score_detector = branch_score_detector(records, branch)
+        rows = branch_rows(records, branch, score_detector)
         section = binary_metrics(rows, flagged, cleared)
+        section["score_detector"] = score_detector
         # Per subgroup: recall within positive subgroups, FPR within negative ones.
         sub: dict[str, list] = defaultdict(list)
         for r in rows:

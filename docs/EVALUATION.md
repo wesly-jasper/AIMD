@@ -20,7 +20,7 @@ A manifest is a JSON list (or `.jsonl`) next to the files:
 | `kind` | The manipulation kind (`splice`, `copy-move`, `removal`, `inpainting (GLIDE)` …) or the generator |
 | `generator` | For AI-generated items. Defaults to `kind`. |
 | `mask` | Pixel ground truth (white = edited), in `masks/` or beside the manifest |
-| `split` | `train`, `val` or `test`. Assign it with `split` (below). |
+| `split` | `train`, `val`, `test` or `holdout`. Assign it with `split` (below). `holdout` is frozen (§2.1). |
 | `tags` | Robustness conditions, such as `jpeg_q75` or `downscaled_0.5`. Metrics are broken down by tag. |
 
 **Which items count for which branch.** The two branches are measured separately and never pooled:
@@ -44,6 +44,40 @@ python scripts/evaluate.py split sets/web/manifest.json --out sets/web/manifest.
 - **Deterministic.** The same manifest and `--seed` always give the same split.
 - **Held-out generators.** `--by-generator` puts each AI generator wholly in one split, to test generalisation to a generator the calibration never saw.
 - **Checked.** `validate()` refuses a dataset in which any group appears in two splits, a file or mask is missing, or an id repeats.
+
+### 2.1 The frozen holdout
+
+Every threshold, calibration and detector choice so far was checked on the `test` split, so it no longer gives an unbiased estimate. The **holdout** is a separate test set that nothing is tuned against.
+
+```
+python scripts/evaluate.py freeze <set>/manifest.split.json --note "bench2 v1"
+```
+
+This writes `backend/evaluation/holdout.lock.json`, which is committed with the code. It lists every holdout file **by content hash** (with id, label, generator and tags), and never the images themselves. The rules are then enforced:
+
+| Command | With a lock present |
+|---|---|
+| `calibrate` | Refuses `--split holdout`, and refuses any run where a locked file is labelled with another split. |
+| `split` | Keeps locked files in the holdout, whatever the new fractions. |
+| `run` | Hashes every file. It refuses a holdout file that is not in the lock (changed or added after freezing), and a locked file listed under another split. Holdout runs record the lock in `run.json`. |
+| `metrics --split holdout` | States the lock the run was verified against, or warns that it wasn't verified. |
+| `freeze` | Refuses to replace a lock unless given `--replace`. Replacing it means results on the old holdout are no longer holdout results, so it is only for a new benchmark version, and the report must say so. |
+
+**How to use it.** Develop on `val` and `test`. Look at the holdout once per release candidate, and report what it says, including when it is worse. If a holdout result prompts a change, the next holdout figure is no longer independent. Collect a new holdout (`--replace`, new version) before claiming a target from it.
+
+### 2.2 The second benchmark (`scripts/build_benchmark.py`)
+
+The first set has 15 GPT-image and 7 Grok/Flux files, no transformed copies, and a test split that has been used for every decision. `build_benchmark.py` builds a second set from Wikimedia Commons to fix all three:
+
+- **Independent sources.**
+  - Files are crawled from each generator's Commons categories and their subcategories. A file found in two generators' categories is dropped.
+  - Each uploader contributes at most 6 files per generator (3 for real photos). One account's images share a prompt style and pipeline, so they would otherwise count as one example many times over.
+  - The uploader is the split `group`, so an account is never in both val and holdout.
+  - Anything already in an existing manifest is skipped.
+- **Real photographs** come from *Quality images*, sampled at random sort-key prefixes rather than only the category's first titles.
+- **Excluded:** titles and categories naming retouches, edits, screenshots, logos, comparisons, collages and diagrams.
+- **Transformed copies.** Each original also appears as `jpeg_q70`, `resize_50`, `crop_80`, `webp_q75` and `social` (720 px, JPEG q75, 4:2:0). These are ordinary things that happen to an image after it leaves the generator. Copies share their original's group, so they are always in the same split. Metrics break down by `tag=`.
+- **Provenance.** Every item records its Commons page, uploader, licence and SHA-256.
 
 ## 3. Run
 

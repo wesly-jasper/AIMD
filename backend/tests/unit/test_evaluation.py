@@ -403,3 +403,13 @@ def test_run_config_records_the_ai_branch_settings():
     assert {"bfree_enabled", "bfree_threshold", "calibration_path",
             "video_keyframe_verdicts_enabled"} <= set(snapshot)
     assert isinstance(snapshot["ai_generation_advisory_detectors"], list)
+
+
+def test_branch_auc_uses_the_deciding_detector_when_it_ran():
+    from app.services.evaluation.metrics import branch_score_detector
+
+    both = [{"detectors": {"UnivFDDetector": {"raw_score": 0.1}, "BFreeDetector": {"raw_score": 0.9}}}]
+    univfd_only = [{"detectors": {"UnivFDDetector": {"raw_score": 0.1}}}]
+    assert branch_score_detector(both, "ai_generation") == "BFreeDetector"
+    assert branch_score_detector(univfd_only, "ai_generation") == "UnivFDDetector"
+    assert branch_score_detector([], "ai_generation") is None

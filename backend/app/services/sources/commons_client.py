@@ -230,11 +230,19 @@ class CommonsClient:
         raise AssertionError("unreachable")
 
     def _api(self, params: dict) -> dict:
-        response = self._send("GET", self.api_url, params=params)
-        try:
-            response.read()
-        finally:
-            response.close()
+        for attempt in range(self.max_retries + 1):
+            response = self._send("GET", self.api_url, params=params)
+            try:
+                response.read()
+                break
+            except httpx.TimeoutException:
+                # extmetadata makes some pages slow to build; a timed-out read
+                # is retried like a 503, then reported.
+                if attempt == self.max_retries:
+                    raise CommonsError("Commons API timed out") from None
+                self._sleep(min(self.max_retry_after, 5.0 * (attempt + 1)))
+            finally:
+                response.close()
         try:
             data = response.json()
         except ValueError as exc:
@@ -244,8 +252,56 @@ class CommonsClient:
             raise CommonsError(f"Commons API error {error.get('code')}: {error.get('info')}")
         return data
 
-    def category_files(self, category: str, *, thumb_width: int) -> Iterator[CommonsFile]:
-        """Every file directly in ``category`` (not its subcategories), lazily, page by page."""
+    def subcategories(self, category: str) -> list[str]:
+        """The names (without "Category:") of ``category``'s direct subcategories."""
+        params = {
+            "action": "query", "format": "json", "formatversion": "2",
+            "list": "categorymembers", "cmtitle": category_title(category),
+            "cmtype": "subcat", "cmlimit": "500",
+        }
+        names: list[str] = []
+        cont: dict = {}
+        while True:
+            data = self._api({**params, **cont})
+            for member in (data.get("query") or {}).get("categorymembers") or []:
+                names.append(member["title"].split(":", 1)[1])
+            cont = data.get("continue") or {}
+            if not cont:
+                return names
+
+    def search_files(self, query: str, *, thumb_width: int, limit: int = 500) -> Iterator[CommonsFile]:
+        """Files matching a Commons full-text ``query`` (CirrusSearch syntax), with imageinfo."""
+        params = {
+            "action": "query", "format": "json", "formatversion": "2",
+            "generator": "search", "gsrsearch": query, "gsrnamespace": "6",
+            "gsrlimit": str(BATCH_SIZE), "prop": "imageinfo",
+            "iiprop": "url|timestamp|user|sha1|size|mime|extmetadata",
+            "iiurlwidth": str(thumb_width),
+            "iiextmetadatafilter": "|".join(EXTMETADATA_FIELDS),
+            "iiextmetadatalanguage": "en",
+        }
+        seen: set[str] = set()
+        cont: dict = {}
+        while len(seen) < limit:
+            data = self._api({**params, **cont})
+            for page in (data.get("query") or {}).get("pages") or []:
+                parsed = parse_file(page)
+                if parsed is None or parsed.title in seen:
+                    continue
+                seen.add(parsed.title)
+                yield parsed
+            cont = data.get("continue") or {}
+            if not cont:
+                return
+
+    def category_files(
+        self, category: str, *, thumb_width: int, start_sortkey_prefix: Optional[str] = None,
+    ) -> Iterator[CommonsFile]:
+        """
+        Every file directly in ``category`` (not its subcategories), lazily, page
+        by page; from ``start_sortkey_prefix`` on when given, which lets a caller
+        sample a large category at several points rather than only its start.
+        """
         params = {
             "action": "query",
             "format": "json",
@@ -260,6 +316,8 @@ class CommonsClient:
             "iiextmetadatafilter": "|".join(EXTMETADATA_FIELDS),
             "iiextmetadatalanguage": "en",
         }
+        if start_sortkey_prefix:
+            params["gcmstartsortkeyprefix"] = start_sortkey_prefix
         seen: set[str] = set()
         cont: dict = {}
         while True:
