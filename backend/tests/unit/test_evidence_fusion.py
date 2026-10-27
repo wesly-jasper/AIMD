@@ -99,3 +99,9 @@ def test_against_on_the_ai_branch_never_says_camera():
     a = out["ai_generation"]
     assert a["status"] == "AGAINST"
     assert "not a finding that the image came from a camera" in a["statement"]
+
+
+def test_cap_counts_distinct_originals_not_their_copies():
+    cal = _cal("BFreeDetector", a=20.0, negatives=600)
+    cal.fitted_on["independent_negatives"] = 99
+    assert likelihood_ratio(cal, 0.999)["log10_lr"] == pytest.approx(2.0)

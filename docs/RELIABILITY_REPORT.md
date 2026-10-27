@@ -303,6 +303,65 @@ Version 2 matches against the two nearest *other* keypoints, orients pairs consi
 
 **Turning it on.** Set `FUSION_CALIBRATION_PATH` to a calibration file (`EVALUATION.md` §6.1). Without it every branch reads NOT_ASSESSED, with directions only.
 
+### 4.6 Second benchmark and the frozen holdout (2026-10-27)
+
+**Set.** `bench2`: 602 originals from Wikimedia Commons (`EVALUATION.md` §2.2):
+- **AI images (362).** 60 each from DALL-E, GPT-image, Imagen / Gemini, Midjourney and Stable Diffusion, plus Grok 37, Flux 15 and Ideogram 10.
+- **Unedited photos (240).** At most 6 AI images and 3 photos per uploader.
+- **Transformed copies.** Every file also appears five more times: JPEG q70, resized to 50%, cropped to 80%, WebP q75, and a "social media" re-encode (720 px, q75).
+- **Split by uploader.** Validation 35%, holdout 65%. The holdout (2,352 files: 1,428 AI, 924 real) was **frozen by content hash before any detector ran on bench2** (`backend/evaluation/holdout.lock.json`, `d959ecd455fe`). It was then evaluated once. Nothing below was tuned on it.
+
+**B-Free, current rule (threshold 0.5), one look at the holdout:**
+
+| | Recall | False positives | AUC |
+|---|---|---|---|
+| Validation (744 AI / 516 real) | 425/744 = 57% [54–61%] | 7/516 = 1% [1–3%] | 0.91 |
+| **Holdout (1,428 AI / 924 real)** | **783/1428 = 55% [52–57%]** | **9/924 = 1% [1–2%]** | **0.89** |
+| Holdout, at the threshold calibrated on validation (5% FPR target) | 913/1428 = 64% | 24/924 = 2.6% | |
+
+**Per generator, on the holdout** (recall at 0.5, then at the calibrated threshold):
+
+| Generator | Recall at 0.5 | Recall at calibrated threshold |
+|---|---|---|
+| Stable Diffusion | 84% | 91% |
+| DALL-E | 83% | 90% |
+| Ideogram | 69% | 85% |
+| Midjourney | 68% | 79% |
+| GPT-image | 39% | 50% |
+| Imagen / Gemini | 31% | 40% |
+| Flux | 25% | 30% |
+| Grok | 18% | 30% |
+
+B-Free was trained on Stable Diffusion-family fakes. The generators furthest from that family are missed most often, and those are exactly the ones the roadmap asked about: GPT-image, Grok and Flux.
+
+**Per transform, on the holdout:**
+
+| Transform | Recall | False positives |
+|---|---|---|
+| Original | 59% | 1/154 |
+| JPEG q70 | 59% | 0/154 |
+| WebP q75 | 60% | 0/154 |
+| Crop to 80% | 58% | 0/154 |
+| Social re-encode | 50% | 2/154 |
+| **Resize to 50%** | **42%** | **6/154 (4%)** |
+
+Recompression and cropping barely matter. Downscaling is the damaging transform: it costs recall and causes most of the false positives.
+
+**UnivFD** scored AUC 0.51 on validation, no better than chance. It stays advisory, and its fitted calibration is nearly flat (LR ≈ 1).
+
+**Evidence fusion on the holdout.** Calibrations were fitted on all validation data (old sets plus bench2 val). The likelihood-ratio cap counts **distinct originals**, not re-encoded copies: 151 AI and 182 real. Cllr is **0.57**.
+
+| | SUPPORTS | LIMITED | AGAINST |
+|---|---|---|---|
+| AI images (1,428) | 45% (22% moderately strong) | 52% | 4% |
+| Real photos (924) | 0.1% | 81% | 19% |
+
+- **Misleading by 10× or more:** 3.6% of AI images and 0.1% of real photos.
+- **Where the misleading ratios come from.** The AI images graded AGAINST are mostly Grok (14% of Grok images) and GPT-image (7%). So **an AGAINST on the AI-generation branch is weak evidence of a camera origin**, and the statement on the card and in the report already says it is not that finding.
+- **On the old test split** the same calibrations give Cllr 0.65 (0.61 with the val-only fit), with 2.9% of real files misleading by 10× or more. Calibrations carry over imperfectly between collections, which is why every number holds only "for files like the validation data".
+
+**What did not change.** B-Free's verdict threshold stays 0.5: 55% recall at 1% false positives on the holdout. The calibrated threshold (64% at 2.6%) is available through `CALIBRATION_PATH`. Choosing it is a product decision about false positives, not a measurement.
+
 ## 5. What to rely on, and what not to
 
 **Rely on:**
@@ -313,7 +372,7 @@ Version 2 matches against the two nearest *other* keypoints, orients pairs consi
 
 **Don't rely on:**
 - **"No significant anomalies"** as evidence of authenticity. It missed 20% of controlled edits, 66% of generative inpaintings and 78% of recompressed ones, which is what the product wording already says.
-- **"AI generation not indicated".** UnivFD missed 90% of AI images. B-Free (§4.3) misses 31% overall, and about 70% of GPT-image and Flux images.
+- **"AI generation not indicated", or AGAINST on the AI-generation branch.** On the frozen holdout (§4.6), B-Free missed 45% of AI images: 61% of GPT-image, 75% of Flux and 82% of Grok images. Halving an image's size costs a further 17 points of recall.
 - **"Possible AI generation" on a photo, from UnivFD.** It is more often a sign of editing (§3.3). B-Free flagged 2 of 36 edited photos (§4.3), and UnivFD no longer votes when B-Free has a score.
 - **Any video verdict.** None is ever reached.
 - **"Limited" as a finding either way.** It means the detectors barely discriminate on this file.

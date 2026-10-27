@@ -66,7 +66,7 @@ def test_freeze_refuses_to_replace_a_lock(tmp_path):
 
 def test_calibrate_refuses_the_holdout(tmp_path):
     cli = _evaluate_module()
-    args = type("A", (), {"run": str(tmp_path), "split": "holdout", "lock": None,
+    args = type("A", (), {"run": [str(tmp_path)], "split": "holdout", "lock": None,
                           "out": str(tmp_path / "c.json"), "target_fpr": 0.05})
     assert cli.cmd_calibrate(args) == 1
 
@@ -80,6 +80,35 @@ def test_calibrate_refuses_locked_files_under_another_split(tmp_path):
     run.mkdir()
     (run / "run.json").write_text("{}")
     (run / "predictions.jsonl").write_text(json.dumps({"id": "f0", "split": "val"}) + "\n")
-    args = type("A", (), {"run": str(run), "split": "val", "lock": str(lock_path),
+    args = type("A", (), {"run": [str(run)], "split": "val", "lock": str(lock_path),
                           "out": str(tmp_path / "c.json"), "target_fpr": 0.05})
     assert cli.cmd_calibrate(args) == 1
+
+
+def test_calibrate_merges_runs_and_counts_re_encoded_copies_once(tmp_path):
+    cli = _evaluate_module()
+    runs = []
+    for name, detector in (("a", "BFreeDetector"), ("b", "UnivFDDetector")):
+        run = tmp_path / name
+        run.mkdir()
+        (run / "run.json").write_text(json.dumps({"dataset_sha256": name, "commit": "c"}))
+        rows = []
+        for i in range(12):
+            positive = i % 2 == 0
+            for tags, suffix in ((["original"], ".jpg"), (["jpeg_q70"], "__jpeg_q70.jpg")):
+                rows.append({"id": f"img{i}{suffix}", "split": "val", "tags": tags,
+                             "targets": {"ai_generation": positive, "manipulation": None},
+                             "detectors": {detector: {"raw_score": (0.8 if positive else 0.2) + i / 100,
+                                                      "version": "1", "execution_status": "COMPLETED"}}})
+        (run / "predictions.jsonl").write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+        runs.append(str(run))
+    out = tmp_path / "cal.json"
+    args = type("A", (), {"run": runs, "split": "val", "lock": str(tmp_path / "none.json"),
+                          "out": str(out), "target_fpr": 0.2})
+    assert cli.cmd_calibrate(args) == 0
+    saved = json.loads(out.read_text())
+    assert set(saved) == {"BFreeDetector", "UnivFDDetector"}  # one detector from each run
+    fitted = saved["BFreeDetector"]["fitted_on"]
+    assert (fitted["positives"], fitted["negatives"]) == (12, 12)
+    assert (fitted["independent_positives"], fitted["independent_negatives"]) == (6, 6)
+    assert fitted["runs"] == ["a", "b"]

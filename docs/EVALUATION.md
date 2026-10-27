@@ -149,9 +149,13 @@ python scripts/evaluate.py compare runs/baseline runs/calibrated --split test
 ### 6.1 Evidence fusion
 
 ```
-python scripts/evaluate.py calibrate runs/<val-run> --split val --out models/fusion-calibration.json
+python scripts/evaluate.py calibrate runs/<val-run> [runs/<another-val-run> ...] --split val --out models/fusion-calibration.json
 FUSION_CALIBRATION_PATH=models/fusion-calibration.json   # quantifies evidence; detector flags unchanged
 ```
+
+Several runs are merged by file id. One run can hold some detectors' results and another run the rest.
+
+Each record notes `independent_positives` and `independent_negatives`: distinct originals, with a file's transformed copies counted once. Fusion caps its likelihood ratios on those counts.
 
 `calibrate` fits the copy-move detector by **flag rate**, P(fires | edited) against P(fires | genuine), with add-one-half smoothing. Its score is 0 on almost every file, and a sigmoid through that is flat. Every other detector is fitted with Platt scaling.
 

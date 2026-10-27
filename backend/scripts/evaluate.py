@@ -224,23 +224,43 @@ def cmd_compare(args) -> int:
     return 1 if result["regressions"] else 0
 
 
+#: Tags ``build_benchmark.py transform`` gives a re-encoded copy of an original.
+TRANSFORM_TAGS = frozenset({"jpeg_q70", "resize_50", "crop_80", "webp_q75", "social"})
+
+
+def _original_of(record: dict) -> str:
+    """The id of the image a record was derived from (its own id for an original)."""
+    if TRANSFORM_TAGS.intersection(record.get("tags") or ()):
+        return record["id"].rsplit("__", 1)[0]
+    return record["id"].rsplit(".", 1)[0]
+
+
 def cmd_calibrate(args) -> int:
     from app.services.detection import calibration
     from app.services.evaluation.metrics import BRANCH_DETECTORS
     from app.services.evaluation.runner import load_predictions
 
-    run_dir = Path(args.run)
+    run_dirs = [Path(r) for r in args.run]
     if args.split == "holdout":
         print("refused: nothing is fitted on the frozen holdout")
         return 1
-    records = [r for r in load_predictions(run_dir / "predictions.jsonl") if r.get("split") == args.split]
+    # Several runs merge by file id: one run may hold some detectors' results
+    # for a file and another the rest (a screening run beside a full one).
+    merged: dict[str, dict] = {}
+    for run_dir in run_dirs:
+        for r in load_predictions(run_dir / "predictions.jsonl"):
+            if r.get("split") != args.split:
+                continue
+            m = merged.setdefault(r["id"], {**r, "detectors": {}})
+            m["detectors"].update(r.get("detectors") or {})
+    records = list(merged.values())
     frozen = holdout.locked_ids(holdout.load_lock(args.lock))
     leaked = [r["id"] for r in records if r["id"] in frozen]
     if leaked:
         print(f"refused: {len(leaked)} frozen holdout files are labelled {args.split!r} "
               f"in this run (e.g. {leaked[0]})")
         return 1
-    info = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+    infos = [json.loads((d / "run.json").read_text(encoding="utf-8")) for d in run_dirs]
     fitted = {}
     for branch, detector in [(b, d) for b, ds in BRANCH_DETECTORS.items() for d in ds]:
         rows = [
@@ -252,6 +272,10 @@ def cmd_calibrate(args) -> int:
             # it; fitting on it would credit the detector with silence it never had.
             and r["detectors"][detector].get("execution_status", "COMPLETED") == "COMPLETED"
         ]
+        originals = [_original_of(r) for r in records
+                     if r["targets"].get(branch) is not None
+                     and r["detectors"].get(detector, {}).get("raw_score") is not None
+                     and r["detectors"][detector].get("execution_status", "COMPLETED") == "COMPLETED"]
         versions = {v for _, _, v in rows}
         if len(versions) != 1:
             print(f"{detector}: skipped ({len(rows)} scored rows, versions {sorted(map(str, versions))})")
@@ -261,8 +285,14 @@ def cmd_calibrate(args) -> int:
             print(f"{detector}: skipped (needs both classes on the {args.split} split)")
             continue
         try:
-            fitted_on = {"dataset_sha256": info.get("dataset_sha256"), "split": args.split,
-                         "run": run_dir.name, "commit": info.get("commit")}
+            fitted_on = {
+                "dataset_sha256": [i.get("dataset_sha256") for i in infos], "split": args.split,
+                "runs": [d.name for d in run_dirs], "commits": sorted({str(i.get("commit")) for i in infos}),
+                # Re-encoded copies of one image are not independent observations;
+                # evidence fusion caps its likelihood ratios on these counts.
+                "independent_positives": len({o for o, (_, t, _) in zip(originals, rows) if t}),
+                "independent_negatives": len({o for o, (_, t, _) in zip(originals, rows) if not t}),
+            }
             if detector in calibration.FLAG_RATE_DETECTORS:
                 cal = calibration.fit_flag_rate(detector, versions.pop(), scores, targets,
                                                 flag_threshold=0.5, fitted_on=fitted_on)
@@ -277,7 +307,8 @@ def cmd_calibrate(args) -> int:
                   f"({cal.validation['ece_raw']} -> {cal.validation['ece_calibrated']})")
         fitted[detector] = cal
         print(f"{detector} [{cal.method}]: a={cal.a:.3f} b={cal.b:.3f} threshold={cal.threshold:.4f} "
-              f"validation={cal.validation} n={cal.fitted_on['positives']}+/{cal.fitted_on['negatives']}-")
+              f"validation={cal.validation} n={cal.fitted_on['positives']}+/{cal.fitted_on['negatives']}- "
+              f"({cal.fitted_on['independent_positives']}+/{cal.fitted_on['independent_negatives']}- independent)")
     if not fitted:
         print("nothing was calibrated")
         return 1
@@ -330,8 +361,8 @@ def main() -> int:
     p.add_argument("--split", default="test")
     p.set_defaults(func=cmd_compare)
 
-    p = sub.add_parser("calibrate", help="fit calibration on a run's validation split")
-    p.add_argument("run")
+    p = sub.add_parser("calibrate", help="fit calibration on runs' validation split")
+    p.add_argument("run", nargs="+", help="one or more run directories, merged by file id")
     p.add_argument("--out", required=True)
     p.add_argument("--split", default="val")
     p.add_argument("--target-fpr", type=float, default=0.05)

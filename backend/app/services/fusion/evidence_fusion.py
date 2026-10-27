@@ -20,7 +20,8 @@ How the number is made:
     class balance (``prior``); dividing the odds by the prior odds gives the LR.
   * An LR is capped at what the validation data could show. With n validation
     negatives, a false-positive rate below 1/(n+1) was never observed, so an LR
-    above n+1 is extrapolation. Capped values are marked.
+    above n+1 is extrapolation. n counts distinct original images, not their
+    re-encoded copies. Capped values are marked.
   * Within a signal family the strongest contribution counts, never the sum:
     detectors with the same physical basis are not independent witnesses.
   * Across families the result is a range. One end assumes the families are
@@ -85,7 +86,10 @@ def likelihood_ratio(cal: Calibration, raw: float) -> dict[str, Any]:
     fitted = cal.fitted_on or {}
     # Evidence *for* the positive class is limited by how many negatives were
     # seen, and evidence against it by how many positives were.
-    n = fitted.get("negatives") if value > 0 else fitted.get("positives")
+    side = "negatives" if value > 0 else "positives"
+    # Re-encoded copies of one image are not independent, so the cap counts
+    # distinct originals where the calibration recorded them.
+    n = fitted.get(f"independent_{side}") or fitted.get(side)
     cap = math.log10((n or 0) + 1) if n else None
     capped = cap is not None and abs(value) > cap
     if capped:
