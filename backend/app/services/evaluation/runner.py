@@ -155,6 +155,11 @@ def predict_item(item: EvalItem, engine: ImageDetectionEngine, video_engine: Any
                 "duration_ms": r.metadata.get("runtime_ms"),
                 "version": r.detector_version,
                 "evidential": ImageDetectionEngine._family(r.detector) not in NON_MANIPULATION_FAMILIES,
+                # The detector's numeric by-products (e.g. TruFor's localization
+                # peak), so an alternative decision rule can be evaluated from
+                # the saved run without running the models again.
+                "signals": {k: v for k, v in r.metadata.items()
+                            if isinstance(v, (int, float)) and not isinstance(v, bool)},
             }
             if item.mask_path is not None and r.detector == "TruForDetector" and r.produced_observations:
                 loc = _localisation(r, item.mask_path)

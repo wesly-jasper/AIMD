@@ -1,4 +1,5 @@
 import logging
+from pathlib import Path
 
 from app.core.config import settings
 from app.services.detection.detectors.image.trufor_detector import (
@@ -39,6 +40,11 @@ class DetectorFactory:
                 initialization_error="TruFor model path is not configured",
             )
 
+        if not Path(settings.trufor_model_path).exists():
+            # Before the memory check: a missing install must be reported as
+            # missing, not as whatever memory happened to be free at the time.
+            return TruForDetector(runner=None, initialization_error="TruFor initialization failed: FileNotFoundError")
+
         refused = memory_preflight(settings.model_load_min_free_mb)
         if refused:
             logger.warning("TruFor not loaded: %s", refused)
@@ -71,6 +77,11 @@ class DetectorFactory:
                 initialization_error="UnivFD model path is not configured",
             )
 
+        if not Path(settings.univfd_model_path).exists():
+            # Before the memory check: a missing install must be reported as
+            # missing, not as whatever memory happened to be free at the time.
+            return UnivFDDetector(runner=None, initialization_error="UnivFD initialization failed: FileNotFoundError")
+
         refused = memory_preflight(settings.model_load_min_free_mb)
         if refused:
             logger.warning("UnivFD not loaded: %s", refused)
@@ -94,6 +105,11 @@ class DetectorFactory:
 
         if not settings.bfree_model_path:
             return BFreeDetector(runner=None, initialization_error="B-Free model path is not configured")
+
+        if not Path(settings.bfree_model_path).exists():
+            # Before the memory check: a missing install must be reported as
+            # missing, not as whatever memory happened to be free at the time.
+            return BFreeDetector(runner=None, initialization_error="B-Free initialization failed: FileNotFoundError")
 
         refused = memory_preflight(settings.model_load_min_free_mb)
         if refused:

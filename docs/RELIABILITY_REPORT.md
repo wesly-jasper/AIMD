@@ -245,6 +245,38 @@ The two newest families together come to 5/17 = 29% [13–53%]. **"Not indicated
 
 **Still short of target:** balanced accuracy 0.83 meets the ≥ 0.80 target. FPR 3% meets ≤ 5%, but its interval runs to 7%. With 55 generated test files, a larger test set is needed before calling the target met.
 
+### 4.4 Manipulation detection, Phase 3 (2026-10-27)
+
+**Method.** Screening run `p3-screen`: TruFor and the copy-move detector on all 502 files, with each detector's numeric by-products saved (localisation-map peak and mean, reliability, inlier counts). Every rule below was fitted on **validation** for at most a 5% false-positive rate, then applied unchanged to **test** (138 manipulated, 138 real).
+
+**Copy-move detector fixed.** It had never fired, for two reasons:
+- **Self-matching.** It matched each SIFT descriptor against the same set with k=2. The nearest neighbour of a keypoint is itself, and that pair was discarded, so the ratio test almost never compared two real candidates.
+- **Wrong geometry.** It verified matches with a fundamental matrix, which models two camera views rather than a region pasted within one image.
+
+Version 2 matches against the two nearest *other* keypoints, orients pairs consistently, and fits a similarity transform with RANSAC. It flags at 50 or more inliers: on validation the 5 copy-moves had 85–413 inliers and the 72 genuine photos at most 35. It reports a box for the source and for the copy.
+
+| Test split | Recall | False positives |
+|---|---|---|
+| TruFor ≥ 0.5 (current rule) | 60/138 = 43% [35–52%] | 10/138 = 7% [4–13%] |
+| Copy-move detector alone | 13/138 = 9% | **0/138 = 0% [0–3%]** |
+| **TruFor or copy-move** | **64/138 = 46% [38–55%]** | **10/138 = 7% [4–13%]** |
+
+- **Copy-moves:** 10/15 → **14/15**. The detector flagged none of the 210 genuine files on any split, and 9 of them were inconclusive (too few keypoints).
+- **Corroboration.** On 9 test copy-moves both families fire, and the pipeline's own rule grades them **LIKELY_MANIPULATED / STRONG**: the first STRONG verdicts in any evaluation. No genuine file received one.
+
+**Rejected, with the numbers:**
+
+| Change | Recall | False positives | Why rejected |
+|---|---|---|---|
+| Lower TruFor threshold (0.421, fitted on val) | 67/138 = 49% | 12/138 = 9% | Within noise, in the wrong direction for false positives |
+| Decide on the localisation-map peak (the E2E report's H4 idea) | 37/138 = 27% | 10/138 = 7% | Worse than the global score at the same false-positive rate |
+| Decide on the localisation-map mean | 18/138 = 13% | 6/138 = 4% | |
+
+**Still open.**
+- **AI inpainting:** recall on GLIDE inpainting (256 px CocoGlide) stays at 32/102 = 31%. TruFor wasn't trained on diffusion inpainting at that size, and no rule over its outputs recovers it.
+- **AI inpainting is not the AI-generation branch's job.** The AI-generation detectors answer a different question ("was the whole image generated?"), and partly generated images are excluded from that branch by design (`EVALUATION.md` §1). An inpainting-specific localiser is the next candidate.
+- **TruFor stability:** the out-of-memory recovery (§4.1) held in every run since, with 0 run errors in 1,004 file-runs.
+
 ## 5. What to rely on, and what not to
 
 **Rely on:**
@@ -257,7 +289,7 @@ The two newest families together come to 5/17 = 29% [13–53%]. **"Not indicated
 - **"AI generation not indicated".** UnivFD missed 90% of AI images. B-Free (§4.3) misses 31% overall, and about 70% of GPT-image and Flux images.
 - **"Possible AI generation" on a photo, from UnivFD.** It is more often a sign of editing (§3.3). B-Free flagged 2 of 36 edited photos (§4.3), and UnivFD no longer votes when B-Free has a score.
 - **Any video verdict.** None is ever reached.
-- **Multi-detector corroboration.** No manipulation detector other than TruFor fired in 502 images.
+- **Multi-detector corroboration, except for copy-moves.** Until §4.4 no manipulation detector other than TruFor fired in 502 images. The fixed copy-move detector now corroborates TruFor on clones, and nothing else does yet.
 - **VERIFIED_MATCH as proof that a file is unedited** (§3.5).
 
 ## 6. Environment
