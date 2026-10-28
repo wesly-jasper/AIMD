@@ -97,3 +97,53 @@ def test_matches_the_authors_reference_logits():
                  "img0002.png": 4.430519, "img0003.png": 3.8499813}
     for name, logit in reference.items():
         assert runner.predict(demo / name)["logit"] == pytest.approx(logit, abs=1e-3)
+
+
+def _loaded_runner(tmp_path, **kwargs):
+    model = _tiny()
+    state = {**{f"patch_embed.{k}": v for k, v in model.patch_embed.state_dict().items()},
+             **model.vit.state_dict()}
+    target = tmp_path / release.MODEL_DIR / release.WEIGHTS_FILE
+    target.parent.mkdir(parents=True, exist_ok=True)
+    torch.save({"model": state}, target)
+    runner = BFreeRunner(tmp_path, device="cpu", model_builder=_tiny, verify_hash=False, **kwargs)
+    runner.load()
+    return runner
+
+
+def _png(path, h, w):
+    Image.fromarray((np.random.default_rng(1).random((h, w, 3)) * 255).astype(np.uint8)).save(path)
+    return path
+
+
+def test_small_inputs_are_tiled_by_default(tmp_path):
+    runner = _loaded_runner(tmp_path)
+    meta = runner.predict(_png(tmp_path / "s.png", 40, 60))["metadata"]
+    assert meta["input_condition"] == "small_tiled" and "raw_logit" not in meta
+    assert ".up" not in runner.version_tag
+
+
+def test_upscale_mode_enlarges_small_inputs_and_offsets_their_logit(tmp_path):
+    runner = _loaded_runner(tmp_path, small_input_mode="upscale", small_input_logit_offset=-2.5)
+    out = runner.predict(_png(tmp_path / "s.png", 40, 60))
+    meta = out["metadata"]
+    assert meta["input_condition"] == "small_upscaled" and meta["image_size"] == [60, 40]
+    assert out["logit"] == pytest.approx(meta["raw_logit"] - 2.5, abs=1e-5)
+    assert runner.version_tag.endswith(".up504o-2.50")  # its own calibration key
+
+    tensor, size = BFreeRunner.preprocess(tmp_path / "s.png", "upscale")
+    assert min(size) == release.CROP_SIZE and tensor.shape[-2:] == (504, 756)
+
+
+def test_upscale_mode_leaves_full_size_inputs_alone(tmp_path):
+    runner = _loaded_runner(tmp_path, small_input_mode="upscale", small_input_logit_offset=-2.5)
+    big = _png(tmp_path / "b.png", 520, 600)
+    out = runner.predict(big)
+    assert out["metadata"]["input_condition"] == "full_size" and "raw_logit" not in out["metadata"]
+    runner.small_input_mode = "tile"  # same weights, the other mode
+    assert out["logit"] == pytest.approx(runner.predict(big)["logit"], abs=1e-5)
+
+
+def test_unknown_small_input_mode_is_refused(tmp_path):
+    with pytest.raises(ValueError, match="small_input_mode"):
+        BFreeRunner(tmp_path, small_input_mode="stretch")

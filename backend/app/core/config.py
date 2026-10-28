@@ -88,11 +88,17 @@ class Settings(BaseSettings):
     bfree_enabled: bool = False
     bfree_model_path: Optional[Path] = None
     bfree_threshold: float = 0.5
-    # AI-generation detectors that are reported but do not vote while another
-    # detector on the branch produced a score. UnivFD: on the evaluation test
-    # split (2026-10-27) it found 4/55 generated images (AUC 0.63) and flagged
-    # 13/36 edited photographs, so its disagreement with B-Free (38/55, 6/36)
-    # turned 105/331 verdicts into CONFLICTING noise. Alone, it still votes.
+    # Inputs with a side under 504 px: "tile" (the authors' wrapper) or
+    # "upscale" (enlarge to 504, then add bfree_small_input_logit_offset to the
+    # logit). See RELIABILITY_REPORT §4.7 for the measurements behind both.
+    bfree_small_input_mode: str = "tile"
+    bfree_small_input_logit_offset: float = 0.0
+    # AI-generation detectors that are reported but never vote. UnivFD: on the
+    # evaluation test split (2026-10-27) it found 4/55 generated images (AUC
+    # 0.63) and flagged 13/36 edited photographs, so its disagreement with
+    # B-Free (38/55, 6/36) turned 105/331 verdicts into CONFLICTING noise; on
+    # bench2 val its AUC was 0.51. With B-Free missing, the branch is
+    # UNAVAILABLE rather than decided by it (RELIABILITY_REPORT §4.11).
     ai_generation_advisory_detectors: List[str] = ["UnivFDDetector"]
     # Root certificates a Content Credentials signer must chain to for TRUSTED:
     # the official C2PA Trust List, installed by scripts/fetch_c2pa_trust_list.py.

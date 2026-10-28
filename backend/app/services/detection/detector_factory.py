@@ -117,7 +117,11 @@ class DetectorFactory:
             return BFreeDetector(runner=None, initialization_error=f"B-Free not loaded: {refused}")
 
         try:
-            runner = BFreeRunner(settings.bfree_model_path, device=settings.device)
+            runner = BFreeRunner(
+                settings.bfree_model_path, device=settings.device,
+                small_input_mode=settings.bfree_small_input_mode,
+                small_input_logit_offset=settings.bfree_small_input_logit_offset,
+            )
             runner.load()
             return BFreeDetector(runner, threshold=settings.bfree_threshold)
         except Exception as exc:

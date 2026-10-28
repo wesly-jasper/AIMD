@@ -56,6 +56,11 @@ LIMITATIONS: List[str] = [
 ]
 
 
+#: How an input smaller than one 504 px crop is handled: "tile" repeats it (the
+#: authors' wrapper), "upscale" enlarges it to fill the crop.
+SMALL_INPUT_MODES = ("tile", "upscale")
+
+
 def _replicate_wrap(x: torch.Tensor, height: int, width: int) -> torch.Tensor:
     reps_h = max(int(math.ceil(height / x.shape[-2])), 1)
     reps_w = max(int(math.ceil(width / x.shape[-1])), 1)
@@ -118,7 +123,13 @@ class BFreeRunner:
         device: Optional[str] = None,
         model_builder: Optional[Callable[[], torch.nn.Module]] = None,
         verify_hash: bool = True,
+        small_input_mode: str = "tile",
+        small_input_logit_offset: float = 0.0,
     ):
+        if small_input_mode not in SMALL_INPUT_MODES:
+            raise ValueError(f"small_input_mode must be one of {SMALL_INPUT_MODES}")
+        self.small_input_mode = small_input_mode
+        self.small_input_logit_offset = float(small_input_logit_offset)
         self.root = Path(model_path) if model_path else None
         self.device = resolve_device(device)
         self._builder = model_builder or build_model
@@ -133,7 +144,12 @@ class BFreeRunner:
 
     @property
     def version_tag(self) -> str:
-        return f"bfree-{release.UPSTREAM_COMMIT}.w-{(self.weights_sha256 or 'unknown')[:12]}"
+        tag = f"bfree-{release.UPSTREAM_COMMIT}.w-{(self.weights_sha256 or 'unknown')[:12]}"
+        if self.small_input_mode == "upscale":
+            # Different preprocessing is a different detector for calibration
+            # purposes: a calibration fitted on one never applies to the other.
+            tag += f".up{release.CROP_SIZE}o{self.small_input_logit_offset:+.2f}"
+        return tag
 
     def weights_path(self) -> Path:
         if self.root is None:
@@ -172,9 +188,19 @@ class BFreeRunner:
         }
 
     @staticmethod
-    def preprocess(file_path: Union[str, Path]) -> tuple[torch.Tensor, List[int]]:
+    def preprocess(
+        file_path: Union[str, Path], small_input_mode: str = "tile"
+    ) -> tuple[torch.Tensor, List[int]]:
         with Image.open(file_path) as img:
-            rgb = np.asarray(img.convert("RGB"), dtype=np.float32) / 255.0
+            img = img.convert("RGB")
+            if small_input_mode == "upscale" and min(img.size) < release.CROP_SIZE:
+                # Resolution-aware path: a small input is enlarged so its short
+                # side fills one crop, instead of being tiled. Measured on the
+                # second benchmark's validation split (RELIABILITY_REPORT §4.7).
+                scale = release.CROP_SIZE / min(img.size)
+                img = img.resize((max(release.CROP_SIZE, round(img.size[0] * scale)),
+                                  max(release.CROP_SIZE, round(img.size[1] * scale))), Image.BICUBIC)
+            rgb = np.asarray(img, dtype=np.float32) / 255.0
         tensor = torch.from_numpy(rgb.transpose(2, 0, 1).copy())
         mean = torch.tensor(release.IMAGENET_MEAN).view(3, 1, 1)
         std = torch.tensor(release.IMAGENET_STD).view(3, 1, 1)
@@ -184,7 +210,10 @@ class BFreeRunner:
         if self.model is None:
             raise RuntimeError("B-Free is not loaded")
         started = time.perf_counter()
-        tensor, size = self.preprocess(file_path)
+        with Image.open(file_path) as probe:
+            original_size = list(probe.size)
+        tensor, size = self.preprocess(file_path, self.small_input_mode)
+        upscaled = size != original_size
         with self._lock, torch.inference_mode():
             try:
                 logit = float(self.model(tensor.to(self.device)).reshape(-1)[0].cpu())
@@ -193,14 +222,27 @@ class BFreeRunner:
                     torch.cuda.empty_cache()
         if not math.isfinite(logit):
             raise ValueError("B-Free produced a non-finite logit")
+        raw_logit = logit
+        if upscaled:
+            # Upscaled inputs score systematically lower for both classes; the
+            # offset, fitted on validation, puts them back on the usual scale.
+            logit = raw_logit + self.small_input_logit_offset
         return {
             "logit": logit,
             "score": 1.0 / (1.0 + math.exp(-logit)),
             "metadata": {
                 **self.identity(),
-                "image_size": size,
-                # Under 504 px a side, the crop is filled by repeating the image.
+                "image_size": original_size,
+                "input_condition": (
+                    "small_upscaled" if upscaled
+                    else "small_tiled" if min(original_size) < release.CROP_SIZE else "full_size"
+                ),
+                "small_input_mode": self.small_input_mode,
+                # Under 504 px a side, the crop is filled by repeating the image
+                # (or, in "upscale" mode, by enlarging it).
                 "replicated": min(size) < release.CROP_SIZE,
+                **({"raw_logit": round(raw_logit, 6),
+                    "logit_offset": self.small_input_logit_offset} if upscaled else {}),
                 "inference_time_ms": round((time.perf_counter() - started) * 1000.0, 1),
             },
         }
