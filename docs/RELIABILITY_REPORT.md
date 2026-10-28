@@ -546,6 +546,63 @@ The Markdown and HTML reports gain a section, "9. Run Provenance", with the soft
 
 **The test suite itself** had an order-dependent failure: the per-user daily upload quota counted uploads across the whole session's test database, so later files hit HTTP 429. The quota is now lifted for tests that are not about it, the same way the rate limiter already was. Full suite: 747 passed, 2 skipped.
 
+### 4.12 Why B-Free fails on OpenFake (2026-10-28)
+
+**Method.** A sample of each group was scored with the current B-Free setting (upscale, +1.90): 150 DOCCI reals, 80 ImageNet reals, 120 FLUX.2 images and 80 GPT-image images from OpenFake, plus 184 Commons reals (bench2 val and bench3 originals) as the reference. Each original was also scored after six edits that change one thing each. Image properties were measured beside them. Nothing was fitted. Script: `openfake_causes.py`, evaluation data folder.
+
+| | Commons reals | DOCCI | ImageNet | GPT-image | FLUX.2 |
+|---|---|---|---|---|---|
+| Median logit (flagged) | −5.58 (1%) | **−1.85 (21%)** | −4.39 (0%) | −2.69 (29%) | **−4.96 (7%)** |
+| Short side, median | 682 | 1536 | 375 | 1024 | 1024 |
+| JPEG quality, chroma | 85, 4:2:0 | **75, 4:2:0** | 95, mostly 4:4:4 | PNG or 90–95 | 95, 4:2:0 |
+| Bits per pixel | 2.24 | **1.06** | 5.01 | 3.38 | 3.17 |
+| Laplacian variance (sharpness) | 3,428 | **395** | 1,687 | 561 | 1,086 |
+| Noise (Immerkaer σ) | 5.41 | **1.04** | 3.80 | 2.07 | 2.57 |
+
+**Median logit change after each edit** (share flagged after):
+
+| Edit | Commons reals | DOCCI | ImageNet | GPT-image | FLUX.2 |
+|---|---|---|---|---|---|
+| Lossless re-save (check) | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 |
+| Blur, σ 0.8 | +0.05 | **−0.37** (13%) | +0.22 | −0.20 | −0.22 |
+| Gaussian noise, σ 2 | +0.01 | +0.06 (24%) | +0.02 | +0.04 | +0.02 |
+| Re-encode JPEG q75 | +0.45 | 0.00 (21%) | +0.48 | −0.01 | −0.02 |
+| Centre crop to 1024 px | | −0.82 (15%) | | | |
+| Resize to 75% | +0.15 | **−1.04** (11%) | −0.01 | −1.43 | −0.88 |
+
+**DOCCI: what it is not.**
+- **Not JPEG compression as such.** Re-encoding Commons reals at q75 raises their logits by about 0.45, far short of DOCCI's gap of 3.7. Re-encoding DOCCI changes nothing.
+- **Not smoothing.** Blurring DOCCI makes it *less* AI-like, and adding noise changes nothing.
+- **Not "having been downscaled" in any way these edits can show.** Downscaling DOCCI further lowers its logits by 1.0. Resampling does not push these photos towards "AI".
+- **Not low detail alone.** Commons reals that are as flat and clean as typical DOCCI photos (same Laplacian-variance or noise band, about 24 files) still score −5.3, with none flagged.
+
+**What the data does show.**
+- **The flagged DOCCI photos are the flattest ones.** Median Laplacian variance 120 against 1,469 for DOCCI's lowest-scoring quartile; noise 0.48 against 2.61; 0.68 bits per pixel against 1.65. Within DOCCI the logit correlates with these at ρ ≈ −0.6. In every other group, its correlation with any of the three is weaker than 0.35.
+- **Less content per crop lowers the score.** B-Free scores five 504 px crops at native resolution. On a 1536 × 2048 photo each crop sees a small, often featureless region. Downscaling puts more of the scene into each crop and lowers DOCCI's logits; cropping the centre (other regions, same scale) also lowers them.
+- **The likely explanation is DOCCI's own capture pipeline, which this test did not reproduce.** Clean, high-resolution, low-noise, uniformly processed photos look unlike the camera images B-Free learnt from, and B-Free reads their flat patches as synthetic. This is consistent with everything above, but not proven: no edit made a Commons photo behave like DOCCI.
+
+**FLUX.2 is a recognition failure, not a processing one.** Its images score like real photos (median −4.96), and no edit raises them: blurring, noise and recompression are flat, and downscaling lowers them as for every AI group. B-Free has not learnt FLUX.2's traces. Only a second detector that has learnt them can fix that. None has been evaluated yet.
+
+**Consequence.** A flag on a high-resolution, very clean photo is weaker evidence than the Commons figures suggest, and B-Free's silence on a FLUX.2 image means nothing. Neither can be fixed by preprocessing or calibration. OpenFake stays evaluation only: nothing was fitted on it.
+
+### 4.13 Social-copy false positives: no policy change (2026-10-28)
+
+On the frozen holdout, upscale mode raised false positives on "social" copies (720 px, JPEG q75, 4:2:0) from 2 to 5 of 154 (§4.10). Two remedies were compared **on validation data only**. Each was chosen on bench2 val plus bench3 train (467 AI, 296 real small inputs) and confirmed on bench3 val (182 AI, 92 real):
+- **Fallback:** tile mode for a JPEG at quality ≤ Q, upscale otherwise, for Q from 70 to 85.
+- **Abstention:** upscale, but INCONCLUSIVE for a compressed file whose logit is within 1 or 2 of the threshold.
+
+| Small inputs | Tile | Upscale (current) | Fallback, Q 75 | Abstain, Q 75, ±1 |
+|---|---|---|---|---|
+| Choose set: recall / FP | 45% / 11 of 296 | **70% / 12** | 62% / 12 | 65% / 10, 5% abstain |
+| Choose set, social copies | 38% / 3 of 91 | **67% / 2** | 38% / 3 | 51% / 1, 16% abstain |
+| Confirm set: recall / FP | 47% / 2 of 92 | **68% / 2** | 62% / 2 | 66% / 2, 4% abstain |
+| Confirm set, social copies | 45% / 1 of 31 | **66% / 1** | 45% / 1 | 55% / 1, 15% abstain |
+
+- **On validation data, upscale mode does not raise false positives on social copies:** 2 of 91 against tile's 3, and 1 of 31 for both.
+- **Fallback costs 6–8 points of recall and removes no false positive.**
+- **Abstention removes 2 false positives on the choose set and none on the confirm set.** It costs 4–5% abstentions and 2–5 points of recall.
+- **Decision: no change.** The holdout's 2 → 5 does not reproduce on validation data, and is within chance at these counts. The holdout was not inspected again, because no candidate policy was chosen.
+
 ## 5. What to rely on, and what not to
 
 **Rely on:**
@@ -557,7 +614,7 @@ The Markdown and HTML reports gain a section, "9. Run Provenance", with the soft
 **Don't rely on:**
 - **"No significant anomalies"** as evidence of authenticity. It missed 20% of controlled edits, 66% of generative inpaintings and 78% of recompressed ones, which is what the product wording already says.
 - **"AI generation not indicated", or AGAINST on the AI-generation branch.** On the frozen holdout (§4.6), B-Free missed 45% of AI images: 61% of GPT-image, 75% of Flux and 82% of Grok images. With upscale mode (§4.10) it misses 40%, and halving an image's size costs a further 8 points of recall (tile mode: 17).
-- **AI-generation verdicts on images unlike the Commons data.** On OpenFake (§4.10), B-Free flagged 17% of DOCCI camera photos and found 6% of FLUX.2 images. Its AUC there was 0.59.
+- **AI-generation verdicts on images unlike the Commons data.** On OpenFake (§4.10), B-Free flagged 17% of DOCCI camera photos and found 6% of FLUX.2 images. Its AUC there was 0.59. A flag on a very clean, high-resolution photo is weaker evidence than the Commons figures suggest, and silence on a FLUX.2 image means nothing (§4.12).
 - **"Possible AI generation" on a photo, from UnivFD.** It is more often a sign of editing (§3.3). B-Free flagged 2 of 36 edited photos (§4.3), and UnivFD never votes (§4.11).
 - **Any video verdict.** None is ever reached.
 - **"Limited" as a finding either way.** It means the detectors barely discriminate on this file.
