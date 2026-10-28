@@ -576,10 +576,11 @@ The Markdown and HTML reports gain a section, "9. Run Provenance", with the soft
 - **Not "having been downscaled" in any way these edits can show.** Downscaling DOCCI further lowers its logits by 1.0. Resampling does not push these photos towards "AI".
 - **Not low detail alone.** Commons reals that are as flat and clean as typical DOCCI photos (same Laplacian-variance or noise band, about 24 files) still score −5.3, with none flagged.
 
-**What the data does show.**
-- **The flagged DOCCI photos are the flattest ones.** Median Laplacian variance 120 against 1,469 for DOCCI's lowest-scoring quartile; noise 0.48 against 2.61; 0.68 bits per pixel against 1.65. Within DOCCI the logit correlates with these at ρ ≈ −0.6. In every other group, its correlation with any of the three is weaker than 0.35.
-- **Less content per crop lowers the score.** B-Free scores five 504 px crops at native resolution. On a 1536 × 2048 photo each crop sees a small, often featureless region. Downscaling puts more of the scene into each crop and lowers DOCCI's logits; cropping the centre (other regions, same scale) also lowers them.
-- **The likely explanation is DOCCI's own capture pipeline, which this test did not reproduce.** Clean, high-resolution, low-noise, uniformly processed photos look unlike the camera images B-Free learnt from, and B-Free reads their flat patches as synthetic. This is consistent with everything above, but not proven: no edit made a Commons photo behave like DOCCI.
+**What was observed** (measurements, not explanations):
+- **The flagged DOCCI photos are the flattest ones.** Median Laplacian variance 120 against 1,469 for DOCCI's lowest-scoring quartile; noise 0.48 against 2.61; 0.68 bits per pixel against 1.65. Within DOCCI the logit correlates with these at ρ ≈ −0.6. In every other group, its correlation with any of the three is weaker than 0.35. That is a correlation; what drives it was not established.
+- **Changing what the crops see lowers DOCCI's scores.** B-Free scores five 504 px crops at native resolution. Downscaling DOCCI to 75% lowers its logits by 1.04; a 1024 px centre crop, which changes which regions the crops see without resampling, lowers them by 0.82.
+
+**Hypothesis, not established.** DOCCI's own capture and processing may make its photos unlike the camera images B-Free learnt from: clean, high-resolution, low-noise and uniformly processed. On such a photo each 504 px crop covers a small, often featureless region, and B-Free may read those flat patches as synthetic. This is consistent with the observations above, but no experiment here confirmed it. No edit made a Commons photo behave like a DOCCI one, and flat Commons photos are not flagged. Testing it would need photos from DOCCI's camera pipeline that are not in DOCCI, or Commons photos taken under similar conditions.
 
 **FLUX.2 is a recognition failure, not a processing one.** Its images score like real photos (median −4.96), and no edit raises them: blurring, noise and recompression are flat, and downscaling lowers them as for every AI group. B-Free has not learnt FLUX.2's traces. Only a second detector that has learnt them can fix that. None has been evaluated yet.
 
@@ -602,6 +603,27 @@ On the frozen holdout, upscale mode raised false positives on "social" copies (7
 - **Fallback costs 6–8 points of recall and removes no false positive.**
 - **Abstention removes 2 false positives on the choose set and none on the confirm set.** It costs 4–5% abstentions and 2–5 points of recall.
 - **Decision: no change.** The holdout's 2 → 5 does not reproduce on validation data, and is within chance at these counts. The holdout was not inspected again, because no candidate policy was chosen.
+
+### 4.14 A second AI-generation detector: prepared, not evaluated (2026-10-28)
+
+**Candidates.** Two detectors from GRIP-UNINA's `ClipBased-SyntheticImageDetection` (Cozzolino et al., CVPR-W 2024; code and weights Apache-2.0):
+- **`clipdet_latent10k_plus`:** a linear head on CLIP ViT-L/14 features. CLIP-based like UnivFD, whose AUC here was 0.51, so complementary behaviour is not assumed.
+- **`Corvi2023`:** a ResNet-50 that reads low-level traces at full resolution. A different signal from B-Free's DINOv2.
+
+**Done.**
+- **Code:** the clone is the official repo at commit `c76ef7f` with no local changes. The code that would run contains no subprocess, shell, network or credential access. The repo's one network script, a dataset downloader, is not used.
+- **Weights:** the LFS weights match their recorded sha256 (Corvi2023 `0168451e…`, clipdet_latent10k_plus `1c9c9f48…`).
+- **Loading:** torch 2.14 loads with `weights_only=True`, so a checkpoint cannot execute code.
+- **CLIP backbone:** `laion/CLIP-ViT-L-14-CommonPool.XL-s13B-b90K` (LAION, MIT licence, not gated), downloaded as **safetensors** pinned to commit `d979a50`. Its sha256 `947d3262…` was checked against the Hub's LFS record. The repo's own path, which would download a pickle `.bin`, is bypassed.
+- **Scorer:** written to run offline with a scrubbed environment (no credentials, no inherited variables). It records each model's score, failures, time and peak GPU memory, and skips every file whose content is in the frozen holdout.
+
+**Not done, and why.** The harness's safety policy blocked running the downloaded repository's code. No score has been produced. Nothing about either detector's accuracy is known, and neither is integrated: no detector from this repository is in the application code, configuration or verdict logic.
+
+**To finish it.** Run the scorer on OpenFake and on the Commons validation sets: bench2 val, bench3 val, and web and coco val for edited photos. Measure:
+- recall on the AI images B-Free misses;
+- false positives on real and on edited photos, reported separately for OpenFake and Commons.
+
+Any later use in the product needs its own evaluation and calibration, and a licence check for that use. Apache-2.0 covers the code and the GRIP weights; the CLIP backbone is MIT.
 
 ## 5. What to rely on, and what not to
 

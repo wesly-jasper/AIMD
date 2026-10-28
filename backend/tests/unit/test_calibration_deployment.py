@@ -152,3 +152,28 @@ def test_health_is_degraded_only_when_the_calibration_does_not_fit(monkeypatch, 
     assert cal["consistent"] is healthy
     assert report["status"] == ("ok" if healthy else "degraded")
     assert cal["fusion_calibration_path"]["path"] == path.name  # no directory layout on an open route
+
+
+def _health_for(monkeypatch, path):
+    monkeypatch.setattr(health, "_image_detectors", lambda: [UPSCALE])
+    monkeypatch.setattr(health, "check_database", lambda: "ok")
+    monkeypatch.setattr(settings, "fusion_calibration_path", path)
+    monkeypatch.setattr(settings, "calibration_path", None)
+    return health.build_health_report()
+
+
+def test_health_is_degraded_for_a_missing_file(monkeypatch, tmp_path):
+    report = _health_for(monkeypatch, tmp_path / V4.name)
+    assert report["status"] == "degraded"
+    assert report["detectors"]["calibration"]["fusion_calibration_path"]["state"] == "missing"
+
+
+def test_health_is_degraded_for_a_modified_file(monkeypatch, tmp_path):
+    shutil.copy(CAL_DIR / calibration.CHECKSUM_FILE, tmp_path / calibration.CHECKSUM_FILE)
+    data = json.loads(V4.read_text(encoding="utf-8"))
+    data["BFreeDetector"]["b"] += 0.5  # still a valid calibration, just not the recorded one
+    (tmp_path / V4.name).write_text(json.dumps(data), encoding="utf-8")
+    report = _health_for(monkeypatch, tmp_path / V4.name)
+    cal = report["detectors"]["calibration"]["fusion_calibration_path"]
+    assert report["status"] == "degraded"
+    assert cal["checksum"] == "mismatch" and "sha256" not in cal
