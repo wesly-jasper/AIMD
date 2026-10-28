@@ -25,6 +25,9 @@ COPY backend/requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY backend /app/backend
+# Also outside /app/backend: docker-compose mounts a volume there, which would keep
+# serving the calibration files of the first image ever run.
+COPY backend/calibration /app/calibration
 COPY --from=web-builder /app/web/dist /app/web/dist
 
 WORKDIR /app/backend

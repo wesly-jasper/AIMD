@@ -312,6 +312,8 @@ export interface FusionContribution {
   advisory: boolean;
   direction?: 1 | -1;
   calibrated?: boolean;
+  /** Why there is no number: no file, a file fitted for another version, outside coverage. */
+  reason?: string | null;
   log10_lr?: number | null;
   capped?: boolean;
   counted?: boolean;
@@ -332,6 +334,8 @@ export interface FusionBranch {
 export interface EvidenceFusion {
   method: string;
   version: number;
+  /** The calibration file the ratios came from, and whether it was usable. */
+  calibration?: { state: "unset" | "missing" | "unreadable" | "ok" | "provided"; sha256?: string; checksum?: string };
   manipulation: FusionBranch;
   ai_generation: FusionBranch;
 }

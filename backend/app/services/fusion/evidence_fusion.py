@@ -46,13 +46,16 @@ evaluative reporting: < 1 limited, 1-2 moderate, 2-3 moderately strong,
 """
 from __future__ import annotations
 
+import logging
 import math
 from typing import Any, Iterable, Optional
 
 import numpy as np
 
-from app.services.detection.calibration import Calibration, calibrations_at
+from app.services.detection.calibration import Calibration, calibrations_at, file_status
 from app.services.detection.engine.image_detection_engine import _SIGNAL_FAMILY
+
+logger = logging.getLogger(__name__)
 
 BRANCHES = ("manipulation", "ai_generation")
 _NOT_EVIDENCE = {"non_evidential"}
@@ -132,7 +135,8 @@ def _conservative(entry: dict[str, Any]) -> float:
     return lo if lo > 0 else hi
 
 
-def _entry(row: Any, calibrations: dict[str, Calibration], advisory: set[str]) -> Optional[dict[str, Any]]:
+def _entry(row: Any, calibrations: dict[str, Calibration], advisory: set[str],
+           no_file_reason: Optional[str] = None) -> Optional[dict[str, Any]]:
     branch = branch_of(row.detector)
     if branch is None:
         return None
@@ -167,9 +171,15 @@ def _entry(row: Any, calibrations: dict[str, Calibration], advisory: set[str]) -
                      calibration={"prior": round(cal.prior, 4), "fitted_on": cal.fitted_on})
         if entry["log10_lr"] != 0:
             entry["direction"] = 1 if entry["log10_lr"] > 0 else -1
+    elif cal is not None:
+        # Fitted for other weights or another preprocessing mode (B-Free's
+        # version names its small-input mode): its numbers do not apply here.
+        entry.update(calibrated=False, log10_lr=None,
+                     reason=f"the calibration was fitted for version {cal.detector_version}, "
+                            "not this one: direction only")
     else:
         entry.update(calibrated=False, log10_lr=None,
-                     reason="no calibration for this detector version: direction only")
+                     reason=no_file_reason or "no calibration for this detector: direction only")
     return entry
 
 
@@ -280,13 +290,30 @@ def _statement(branch: str, fused: dict[str, Any]) -> str:
 def fuse(rows: Iterable[Any], *, calibrations: Optional[dict[str, Calibration]] = None,
          advisory: Iterable[str] = ()) -> dict[str, Any]:
     """The fused evidence for both branches of one analysis."""
+    source: dict[str, Any] = {"state": "provided"}
+    no_file_reason = None
     if calibrations is None:
         from app.core.config import settings
 
-        calibrations = calibrations_at(settings.fusion_calibration_path or settings.calibration_path)
+        path = settings.fusion_calibration_path or settings.calibration_path
+        status = file_status(path)
+        source = {k: status[k] for k in ("state", "path", "sha256", "checksum") if k in status}
+        if status["state"] == "unset":
+            no_file_reason = "no calibration file is configured: direction only"
+        elif status["state"] != "ok":
+            # Configured but not usable: say so, rather than read as "never calibrated".
+            no_file_reason = f"the configured calibration file is {status['state']}: direction only"
+            logger.warning("Fusion calibration %s is %s; evidence is not quantified", path, status["state"])
+        elif status.get("checksum") == "mismatch":
+            # Changed since it was recorded in SHA256SUMS: not the validated file.
+            no_file_reason = "the configured calibration file does not match its recorded checksum: direction only"
+            logger.warning("Fusion calibration %s fails its checksum; evidence is not quantified", path)
+        usable = status["state"] == "ok" and status.get("checksum") != "mismatch"
+        calibrations = calibrations_at(path) if usable else {}
     advisory = set(advisory)
-    entries = [e for e in (_entry(r, calibrations, advisory) for r in rows) if e is not None]
-    out: dict[str, Any] = {"method": "likelihood-ratio range over calibrated signal families", "version": 1}
+    entries = [e for e in (_entry(r, calibrations, advisory, no_file_reason) for r in rows) if e is not None]
+    out: dict[str, Any] = {"method": "likelihood-ratio range over calibrated signal families", "version": 1,
+                           "calibration": source}
     for branch in BRANCHES:
         fused = _fuse_branch([e for e in entries if e["branch"] == branch])
         fused["statement"] = _statement(branch, fused)

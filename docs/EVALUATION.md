@@ -178,6 +178,8 @@ Several runs are merged by file id. One run can hold some detectors' results and
 
 **A calibration belongs to one B-Free mode.** B-Free's version names its small-input mode and offset (`.up504o+1.90` for the default). After changing either, rerun B-Free (`--only BFreeDetector`) on the validation sets and fit again. Leave the older runs' B-Free results out of the fit, or `calibrate` skips B-Free for mixing versions. The current fit (v4) and how it was made are in `RELIABILITY_REPORT.md` §4.10.
 
+**Deployed calibrations** are versioned in `backend/calibration/`, with `SHA256SUMS`, the B-Free setting each needs and how to roll back (its `README.md`). `/health` reports whether the configured file is present, matches its checksum and fits every running detector's version.
+
 Each record notes `independent_positives` and `independent_negatives`: distinct originals, with a file's transformed copies counted once. Fusion caps its likelihood ratios on those counts.
 
 **Uncertainty and coverage.** Each calibration also stores:

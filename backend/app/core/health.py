@@ -13,6 +13,7 @@ unavailable detector as available is precisely the misrepresentation this platfo
 must not make, so the map is now derived or omitted -- never asserted.
 """
 import logging
+from pathlib import Path
 from typing import Any
 
 from app.core.config import settings
@@ -123,6 +124,32 @@ def detector_operational_status(detectors: list) -> dict[str, Any]:
     return report
 
 
+def calibration_report(detectors: list) -> dict[str, Any]:
+    """
+    Each configured calibration file against the detectors actually running:
+    present, readable, checksum, and whether each detector's version (which for
+    B-Free names its small-input mode and offset) is the one the file was fitted
+    for. A mismatch is not an error inside an analysis -- that detector's
+    evidence is reported as direction only -- but it means the deployment is not
+    the configuration that was validated, so it is surfaced here.
+    """
+    from app.services.detection.calibration import consistency
+
+    live = {type(d).__name__: getattr(d, "version", None) for d in detectors}
+    report: dict[str, Any] = {}
+    for key in ("calibration_path", "fusion_calibration_path"):
+        status = consistency(getattr(settings, key, None), live)
+        # Unauthenticated route: no directory layout and no hashes. ``checksum``
+        # says whether the file is the recorded one; the hash itself is in each
+        # analysis's run provenance.
+        if status.get("path"):
+            status["path"] = Path(status["path"]).name
+        status.pop("sha256", None)
+        report[key] = status
+    report["consistent"] = all(r["consistent"] for r in report.values() if isinstance(r, dict))
+    return report
+
+
 def detector_report() -> dict[str, Any]:
     """
     Describe the detector set that is actually constructed, and how it is doing.
@@ -149,6 +176,7 @@ def detector_report() -> dict[str, Any]:
         "registered_image_detectors": sorted(operational),
         "detectors": operational,
         "failing_detectors": failing,
+        "calibration": calibration_report(detectors),
     }
 
 
@@ -157,7 +185,13 @@ def build_health_report() -> dict[str, Any]:
     detectors = detector_report()
     # A detector failing on every request degrades the service even though the
     # process is up: analyses complete, but without that detector's evidence.
-    healthy = db_status == "ok" and not detectors["failing_detectors"]
+    # So does a calibration that is configured but cannot apply: evidence goes
+    # unquantified without any analysis failing.
+    healthy = (db_status == "ok" and not detectors["failing_detectors"]
+               and detectors["calibration"]["consistent"])
+    if not detectors["calibration"]["consistent"]:
+        logger.warning("Health check: calibration does not match the running detectors: %s",
+                       {k: v.get("state") for k, v in detectors["calibration"].items() if isinstance(v, dict)})
 
     return {
         "status": "ok" if healthy else "degraded",

@@ -506,7 +506,7 @@ An offset scaled by upscale factor was considered and rejected. The fitting copi
 - **Social copies remain the weak spot:** 5 false positives in 154 against tile's 2.
 - **OpenFake barely moves.** Its small files are 154 ImageNet reals and 6 AI images. Two more ImageNet photos were flagged (4 of 154).
 
-**Decision.** The default is now **upscale, offset +1.90** (`BFREE_SMALL_INPUT_MODE`, `BFREE_SMALL_INPUT_LOGIT_OFFSET`). B-Free's version now ends in `.up504o+1.90` for every file. So **a v3 calibration no longer applies to B-Free**: fusion reports its raw score and says why. Use v4, or set `BFREE_SMALL_INPUT_MODE=tile` to keep v3.
+**Decision.** The default is now **upscale, offset +1.90** (`BFREE_SMALL_INPUT_MODE`, `BFREE_SMALL_INPUT_LOGIT_OFFSET`). B-Free's version now ends in `.up504o+1.90` for every file. So **a v3 calibration no longer applies to B-Free**: fusion reports its raw score and says why. Both files are in `backend/calibration/`, with checksums and rollback steps. `/health` reports `degraded` when the configured file does not fit the running detectors, and fusion states the reason for each uncalibrated detector.
 
 **Calibration v4.** Refitted on the same validation runs as v3, with B-Free rerun in upscale mode. One file was removed: the web val image identical to a holdout file (§4.8), so v4 no longer has that leak. At 4.9% false positives on val, B-Free recall is 75% (v3: 66%).
 

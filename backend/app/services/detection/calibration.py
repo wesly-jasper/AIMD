@@ -23,6 +23,7 @@ with this mix", not a universal likelihood; reports say so.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import math
@@ -351,6 +352,76 @@ def calibrations_at(path: Optional[str | Path]) -> dict[str, Calibration]:
                 _cache["value"] = {}
             _cache["path"], _cache["mtime"] = path, mtime
         return _cache["value"]
+
+
+#: Checksums of the versioned calibration files, kept beside them.
+CHECKSUM_FILE = "SHA256SUMS"
+
+
+def file_status(path: Optional[str | Path]) -> dict[str, Any]:
+    """
+    What is at a configured calibration path: ``state`` is ``unset``,
+    ``missing``, ``unreadable`` or ``ok``. When ok, also its sha256, whether
+    that matches the ``SHA256SUMS`` beside it (``checksum``: ``verified``,
+    ``mismatch`` or ``unlisted``) and the detector version each entry was
+    fitted for. Never raises: a broken file is a status, not a crash.
+    """
+    if not path:
+        return {"state": "unset"}
+    path = Path(path)
+    out: dict[str, Any] = {"path": str(path)}
+    try:
+        data = path.read_bytes()
+    except OSError as exc:
+        return {**out, "state": "missing", "error": type(exc).__name__}
+    digest = hashlib.sha256(data).hexdigest()
+    try:
+        entries = {name: Calibration(**entry) for name, entry in json.loads(data).items()}
+    except Exception as exc:  # malformed JSON or entries are the same failure to a reader
+        return {**out, "state": "unreadable", "sha256": digest, "error": type(exc).__name__}
+    return {**out, "state": "ok", "sha256": digest, "checksum": _checksum_state(path, digest),
+            "detectors": {name: c.detector_version for name, c in entries.items()}}
+
+
+def _checksum_state(path: Path, digest: str) -> str:
+    try:
+        lines = (path.parent / CHECKSUM_FILE).read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return "unlisted"
+    for line in lines:
+        parts = line.split()
+        if len(parts) == 2 and parts[1].lstrip("*") == path.name:
+            return "verified" if parts[0].lower() == digest else "mismatch"
+    return "unlisted"
+
+
+def consistency(path: Optional[str | Path], live_versions: dict[str, Optional[str]]) -> dict[str, Any]:
+    """
+    ``file_status`` plus, per detector that is either running or in the file,
+    whether the calibration applies to it: ``matched``, ``version_mismatch``
+    (fitted for other weights or another preprocessing mode; the detector's
+    scores then go uncalibrated), ``not_in_file`` or ``not_running``.
+    ``consistent`` is false for a configured file that is missing, unreadable,
+    fails its checksum, or does not match a running detector it covers.
+    """
+    status = file_status(path)
+    if status["state"] != "ok":
+        return {**status, "consistent": status["state"] == "unset", "detector_status": {}}
+    fitted = status["detectors"]
+    per: dict[str, Any] = {}
+    for name in sorted(set(fitted) | set(live_versions)):
+        live = live_versions.get(name)
+        if name not in fitted:
+            per[name] = {"status": "not_in_file", "running": live}
+        elif name not in live_versions:
+            per[name] = {"status": "not_running", "fitted": fitted[name]}
+        elif fitted[name] != live:
+            per[name] = {"status": "version_mismatch", "fitted": fitted[name], "running": live}
+        else:
+            per[name] = {"status": "matched", "version": live}
+    consistent = status["checksum"] != "mismatch" and not any(
+        p["status"] == "version_mismatch" for p in per.values())
+    return {**status, "consistent": consistent, "detector_status": per}
 
 
 def calibrate_score(detector: str, detector_version: Optional[str], raw: float) -> Optional[dict[str, Any]]:

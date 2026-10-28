@@ -12,6 +12,10 @@ services:
       - LOG_LEVEL=INFO
       - APP_ENV=production
       - DEVICE=cpu
+      # Calibration and the B-Free mode it was fitted for (backend/calibration/README.md)
+      - BFREE_SMALL_INPUT_MODE=upscale
+      - BFREE_SMALL_INPUT_LOGIT_OFFSET=1.90
+      - FUSION_CALIBRATION_PATH=/app/calibration/fusion-calibration.v4.json
     volumes:
       - aimd_uploads:/app/backend/uploads
       - aimd_processed:/app/backend/processed
