@@ -297,3 +297,7 @@ td.note { color: var(--muted); max-width: 32ch; }
 }
 .segmented { width: 100%; max-width: none; }
 .segmented button { white-space: nowrap; }
+
+/* Advisory state: every verdict until the verdicts pass independent evaluation. */
+.pill.advisory { align-self: flex-start; margin-bottom: 10px; background: var(--hue-wash); color: var(--hue); }
+.advisory-note { margin-top: 10px; padding: 10px 12px; border-radius: var(--radius-inner); background: #0b0b0b; color: var(--muted); font-size: 13px; line-height: 19px; text-wrap: pretty; }

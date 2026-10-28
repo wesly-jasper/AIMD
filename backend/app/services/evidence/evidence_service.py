@@ -23,6 +23,7 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from app.db import repository as repo
+from app.services.evidence.verdict_state import verdict_state
 from app.services.provenance.timeline import build_timeline
 
 logger = logging.getLogger(__name__)
@@ -318,6 +319,7 @@ class EvidenceService:
             "limitations": limitations,
             "overall_assessment": analysis.assessment,
             "evidence_strength": analysis.evidence_strength,
+            "verdict_state": verdict_state(analysis.config_snapshot),
             "generated_at": datetime.now(timezone.utc).isoformat(),
         }
 

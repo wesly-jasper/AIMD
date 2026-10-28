@@ -53,6 +53,7 @@ import torch.nn.functional as F
 from PIL import Image
 
 from app.services.detection.models import trufor_release as release
+from app.services.evidence.heatmap_artefacts import region_mask
 
 logger = logging.getLogger(__name__)
 
@@ -611,19 +612,12 @@ class TruForRunner:
     def _regions(
         localization: np.ndarray, reliability: np.ndarray, threshold: float
     ) -> List[Dict[str, Any]]:
-        """Connected areas of the localization map above ``threshold``, cleaned of speckle."""
-        h, w = localization.shape
-        binary = (localization >= threshold).astype(np.uint8) * 255
-        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
-        binary = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel)
-        binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel)
-        contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        """Connected areas of the localization map above ``threshold``, cleaned of speckle.
 
-        min_area = h * w * 0.001
+        The same areas the mask artefact shows (``region_mask``)."""
+        _, contours = region_mask(localization, threshold)
         regions: List[Dict[str, Any]] = []
         for contour in contours:
-            if cv2.contourArea(contour) < min_area:
-                continue
             x, y, bw, bh = cv2.boundingRect(contour)
             loc_crop = localization[y:y + bh, x:x + bw]
             rel_crop = reliability[y:y + bh, x:x + bw]

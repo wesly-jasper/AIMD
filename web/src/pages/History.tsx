@@ -40,7 +40,10 @@ export function History() {
     <Shell>
       <TitleRow
         title="History"
-        sub={media.data ? `${count(items.length, "file")} checked` : "Every file you have checked"}
+        sub={<>
+          {media.data ? `${count(items.length, "file")} checked` : "Every file you have checked"}
+          {" · results are advisory until the checks pass independent evaluation"}
+        </>}
         actions={<Link className="btn primary" to="/">Check a file</Link>}
       />
 

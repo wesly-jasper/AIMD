@@ -1,9 +1,9 @@
 import { useEffect, useState, type RefObject } from "react";
 import { useBlobUrl } from "../hooks";
-import { SEMANTICS, dateTime, duration, score } from "../format";
-import { checkName, shortVerdict, unavailableReason } from "../plain";
+import { SEMANTICS, count, dateTime, duration, score } from "../format";
+import { checkName, outcomeOf, shortVerdict, unavailableReason } from "../plain";
 import { DeclaredOrigin, credentialsSummary } from "./Credentials";
-import type { AiGeneration, AnalysisDetail, Artefact, Detection, FrameScore, Segment, Source, SourceSearch, TimelineEvent, EvidenceFusion, FusionBranch, FusionContribution, FusionStatus } from "../types";
+import type { AiGeneration, AnalysisDetail, Artefact, Detection, FrameScore, Observation, Segment, Source, SourceSearch, TimelineEvent, EvidenceFusion, FusionBranch, FusionContribution, FusionStatus } from "../types";
 
 /** Not assessed, said in so many words: an absent result never reads as a clean one. */
 export function Unavailable({ children }: { children: React.ReactNode }) {
@@ -260,112 +260,202 @@ export function EvidenceStrengthCard({ fusion }: { fusion: EvidenceFusion | null
   );
 }
 
-// ── Heatmap ───────────────────────────────────────────────────────────────────
+// ── Manipulation mask ─────────────────────────────────────────────────────────
 
 function artefactsOf(d: Detection): Record<string, Artefact> {
   const a = d.metadata?.artefacts;
   return a && typeof a === "object" ? (a as Record<string, Artefact>) : {};
 }
 
-export function heatmapDetection(detections: Detection[]): Detection | undefined {
-  return detections.find((d) => artefactsOf(d).localization_map)
+export function maskDetection(detections: Detection[]): Detection | undefined {
+  return detections.find((d) => artefactsOf(d).mask || artefactsOf(d).localization_map)
     ?? detections.find((d) => d.detector === "TruForDetector" || "artefacts_error" in (d.metadata ?? {}));
 }
 
-/** The grayscale localisation map as amber with alpha ∝ value: 0 is clear, 1 is solid. */
-function useTintedMap(src: string | null): { url: string | null; error: boolean } {
-  const [url, setUrl] = useState<string | null>(null);
-  const [error, setError] = useState(false);
+interface MaskLayers { fill: string | null; edge: string | null; fraction: number | null; error: boolean }
+
+/**
+ * Pixels at or above `cut` (0-255) become the mask: a flat amber fill and a solid
+ * outline, as two layers so the fill can be faded while the outline stays. The
+ * outline is about 1/300 of the long side thick, so it survives being shown small.
+ */
+function useMaskLayers(src: string | null, cut: number): MaskLayers {
+  const [out, setOut] = useState<MaskLayers>({ fill: null, edge: null, fraction: null, error: false });
   useEffect(() => {
     if (!src) return;
     let live = true;
-    let made: string | null = null;
+    const made: string[] = [];
     const img = new Image();
     img.onload = () => {
+      const w = img.naturalWidth, h = img.naturalHeight;
       const c = document.createElement("canvas");
-      c.width = img.naturalWidth;
-      c.height = img.naturalHeight;
-      const ctx = c.getContext("2d");
-      if (!ctx) { setError(true); return; }
+      c.width = w;
+      c.height = h;
+      const ctx = c.getContext("2d", { willReadFrequently: true });
+      if (!ctx) { if (live) setOut((o) => ({ ...o, error: true })); return; }
       ctx.drawImage(img, 0, 0);
-      const px = ctx.getImageData(0, 0, c.width, c.height);
-      const p = px.data;
-      for (let i = 0; i < p.length; i += 4) {
-        const v = p[i];
-        p[i] = 242; p[i + 1] = 179; p[i + 2] = 61; p[i + 3] = v;
+      const src8 = ctx.getImageData(0, 0, w, h).data;
+      const m = new Uint8Array(w * h);
+      let on = 0;
+      for (let i = 0; i < m.length; i++) if (src8[i * 4] >= cut) { m[i] = 1; on++; }
+
+      // Boundary pixels, then widened by t with two running-window passes.
+      const edge = new Uint8Array(w * h);
+      for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+        const i = y * w + x;
+        if (m[i] && (x === 0 || y === 0 || x === w - 1 || y === h - 1
+          || !m[i - 1] || !m[i + 1] || !m[i - w] || !m[i + w])) edge[i] = 1;
       }
-      ctx.putImageData(px, 0, 0);
-      c.toBlob((b) => {
-        if (!live || !b) return;
-        made = URL.createObjectURL(b);
-        setUrl(made);
-      }, "image/png");
+      const t = Math.max(1, Math.round(Math.max(w, h) / 300));
+      const wide = new Uint8Array(w * h);
+      for (let y = 0; y < h; y++) {
+        let n = 0;
+        for (let x = 0; x < Math.min(t, w); x++) n += edge[y * w + x];
+        for (let x = 0; x < w; x++) {
+          if (x + t < w) n += edge[y * w + x + t];
+          if (x - t - 1 >= 0) n -= edge[y * w + x - t - 1];
+          wide[y * w + x] = n > 0 ? 1 : 0;
+        }
+      }
+      for (let x = 0; x < w; x++) {
+        let n = 0;
+        for (let y = 0; y < Math.min(t, h); y++) n += wide[y * w + x];
+        for (let y = 0; y < h; y++) {
+          if (y + t < h) n += wide[(y + t) * w + x];
+          if (y - t - 1 >= 0) n -= wide[(y - t - 1) * w + x];
+          edge[y * w + x] = n > 0 ? 1 : 0;
+        }
+      }
+
+      const paint = (on: Uint8Array): Promise<string | null> => {
+        const px = ctx.createImageData(w, h);
+        const p = px.data;
+        for (let i = 0; i < on.length; i++) {
+          if (!on[i]) continue;
+          p[i * 4] = 242; p[i * 4 + 1] = 179; p[i * 4 + 2] = 61; p[i * 4 + 3] = 255;
+        }
+        ctx.putImageData(px, 0, 0);
+        return new Promise((resolve) => c.toBlob((b) => resolve(b ? URL.createObjectURL(b) : null), "image/png"));
+      };
+      (async () => {
+        const fill = await paint(m);
+        const edgeUrl = await paint(edge);
+        for (const u of [fill, edgeUrl]) if (u) made.push(u);
+        if (!live) return;
+        setOut({ fill, edge: edgeUrl, fraction: on / m.length, error: !fill || !edgeUrl });
+      })();
     };
-    img.onerror = () => { if (live) setError(true); };
+    img.onerror = () => { if (live) setOut((o) => ({ ...o, error: true })); };
     img.src = src;
-    return () => { live = false; if (made) URL.revokeObjectURL(made); };
-  }, [src]);
-  return { url, error };
+    return () => { live = false; made.forEach((u) => URL.revokeObjectURL(u)); };
+  }, [src, cut]);
+  return out;
 }
 
-export function HeatmapCard({ analysisId, mediaId, detections }: {
-  analysisId: string; mediaId: string; detections: Detection[];
-}) {
-  const det = heatmapDetection(detections);
-  const art = det ? artefactsOf(det) : {};
-  const mapPath = det && art.localization_map
-    ? `/analysis/${analysisId}/detections/${det.id}/artefacts/localization_map` : null;
-  const original = useBlobUrl(mapPath ? `/media/${mediaId}/download` : null);
-  const map = useBlobUrl(mapPath);
-  const tinted = useTintedMap(map.url);
-  const [opacity, setOpacity] = useState(70);
-  const [view, setView] = useState<"heatmap" | "original">("heatmap");
+function pct(f: number): string {
+  if (f === 0) return "0%";
+  if (f < 0.001) return "under 0.1%";
+  return `${(f * 100).toFixed(f < 0.1 ? 1 : 0)}%`;
+}
 
+/**
+ * Where the manipulation-localisation model marked the image: its map cut at the
+ * recorded threshold. Manipulation only: AI generation is a separate question and
+ * a generated image need not be masked anywhere.
+ */
+export function MaskCard({ analysisId, mediaId, detections, observations }: {
+  analysisId: string; mediaId: string; detections: Detection[]; observations: Observation[];
+}) {
+  const det = maskDetection(detections);
+  // The model's own image-level call. A map can pass the pixel cut in places
+  // on an image the model did not flag; that is shown on request, labelled as
+  // a local response, and never presented as a marked area.
+  const flagged = det ? outcomeOf(det, observations) === "found" : false;
+  const art = det ? artefactsOf(det) : {};
+  // The stored mask when the run wrote one. Runs from before masks were stored
+  // only have the localisation map; it is cut here at the runner's threshold,
+  // without the speckle removal the stored mask has, and the card says so.
+  const stored = art.mask;
+  const kind = stored ? "mask" : art.localization_map ? "localization_map" : null;
+  const threshold = stored?.threshold ?? (typeof det?.metadata?.threshold === "number" ? det.metadata.threshold as number : 0.5);
+  const filePath = det && kind ? `/analysis/${analysisId}/detections/${det.id}/artefacts/${kind}` : null;
+  const original = useBlobUrl(filePath ? `/media/${mediaId}/download` : null);
+  const file = useBlobUrl(filePath);
+  const layers = useMaskLayers(file.url, stored ? 128 : Math.round(threshold * 255));
+  const [fill, setFill] = useState(55);
+  const [view, setView] = useState<"mask" | "original" | null>(null);
+
+  const fraction = stored?.masked_fraction ?? layers.fraction;
+  const empty = fraction === 0;
   let body: React.ReactNode;
   if (!det) {
-    body = <Unavailable>No localisation model ran on this image, so there is no heatmap.</Unavailable>;
+    body = <Unavailable>No manipulation-localisation model ran on this image, so nothing can be masked.</Unavailable>;
   } else if (det.execution_status !== "COMPLETED") {
     body = <Unavailable>{checkName(det.detector)}: {unavailableReason(det)}.</Unavailable>;
-  } else if (!mapPath) {
+  } else if (!filePath) {
     const err = det.metadata?.artefacts_error;
-    body = <Unavailable>{err ? `The heatmap could not be saved during analysis (${String(err)}).` : "This run recorded no heatmap."}</Unavailable>;
-  } else if (map.error || tinted.error || original.error) {
-    body = <Unavailable>The heatmap file could not be retrieved: it is missing from storage or no longer matches the hash recorded at analysis.</Unavailable>;
-  } else if (!original.url || !tinted.url) {
+    body = <Unavailable>{err ? `The mask could not be saved during analysis (${String(err)}).` : "This run recorded no mask."}</Unavailable>;
+  } else if (file.error || layers.error || original.error) {
+    body = <Unavailable>The mask file could not be retrieved: it is missing from storage or no longer matches the hash recorded at analysis.</Unavailable>;
+  } else if (!original.url || !layers.fill || !layers.edge) {
     body = <div className="evidence-frame loading" aria-busy="true" />;
   } else {
+    const shown = (view ?? (flagged ? "mask" : "original")) === "mask" && !empty;
     body = (
       <>
         <div className="evidence-frame">
           <span className="evidence-inner">
-            <img src={original.url} alt="The checked image" />
-            <img className="heat-layer" src={tinted.url} alt="" aria-hidden="true"
-              style={{ opacity: view === "heatmap" ? opacity / 100 : 0 }} />
+            <img src={original.url} alt={shown ? "The checked image with the masked areas covered" : "The checked image"} />
+            <img className="mask-layer" src={layers.fill} alt="" aria-hidden="true"
+              style={{ opacity: shown ? fill / 100 : 0 }} />
+            <img className="mask-layer" src={layers.edge} alt="" aria-hidden="true"
+              style={{ opacity: shown ? 1 : 0 }} />
           </span>
         </div>
-        <div className="heat-controls">
+        <div className="mask-controls">
           <div className="segmented compact" role="tablist" aria-label="Before and after">
-            <button role="tab" aria-selected={view === "original"} onClick={() => setView("original")}>Original</button>
-            <button role="tab" aria-selected={view === "heatmap"} onClick={() => setView("heatmap")}>Heatmap</button>
+            <button role="tab" aria-selected={!shown} onClick={() => setView("original")}>Original</button>
+            <button role="tab" aria-selected={shown} onClick={() => setView("mask")} disabled={empty}>Masked</button>
           </div>
           <label className="slider">
-            <span className="sub-inline">Opacity</span>
-            <input type="range" min={0} max={100} value={opacity} disabled={view !== "heatmap"}
-              onChange={(e) => setOpacity(Number(e.target.value))} aria-valuetext={`${opacity}%`} />
-            <span className="num sub-inline">{opacity}%</span>
+            <span className="sub-inline">Fill</span>
+            <input type="range" min={0} max={100} value={fill} disabled={!shown}
+              onChange={(e) => setFill(Number(e.target.value))} aria-valuetext={`${fill}%`} />
+            <span className="num sub-inline">{fill}%</span>
           </label>
         </div>
-        <div className="heat-legend">
-          <span className="legend-ramp" aria-hidden="true" />
-          <span className="sub-inline">0 → 1: {checkName(det.detector)}’s per-pixel localisation output ({SEMANTICS[det.score_semantics]}). Bright areas are where the model responded, not proof of editing.</span>
-        </div>
+        <p className="mask-summary">
+          {empty
+            ? <>No area reached the threshold, so nothing is masked. That is not a finding that the image is unedited.</>
+            : !flagged
+            ? <>
+                {checkName(det.detector)} did not flag this image.{" "}
+                {stored?.areas != null ? count(stored.areas, "small area") : "Part"} of its map still reached the threshold
+                ({fraction != null ? pct(fraction) : "—"} of the image): a local response below the model’s own decision,
+                not a marked area. Choose Masked to see it.
+              </>
+            : <>
+                <span className="mask-swatch" aria-hidden="true" />
+                <span>
+                  {stored?.areas != null ? <>{count(stored.areas, "area")} masked, </> : null}
+                  covering <span className="num">{fraction != null ? pct(fraction) : "—"}</span> of the image.
+                </span>
+              </>}
+        </p>
+        <p className="sub">
+          Masked where {checkName(det.detector)}’s per-pixel localisation output ({SEMANTICS[det.score_semantics]}) is
+          at least <span className="num">{threshold.toFixed(2)}</span>.{" "}
+          {stored ? "Specks smaller than 0.1% of the image are left out, so every masked area is one of the areas listed for this check." :
+            "This run predates stored masks: the mask is cut from its localisation map in the browser, without speckle removal."}{" "}
+          A mask shows where the model responded, not proof of editing, and it says nothing about AI generation.
+        </p>
       </>
     );
   }
 
   return (
-    <section className="card span-7" aria-labelledby="heat-h">
-      <div className="card-head"><h2 id="heat-h">Heatmap</h2></div>
+    <section className="card span-7" aria-labelledby="mask-h">
+      <div className="card-head"><h2 id="mask-h">Manipulation mask</h2></div>
       {body}
     </section>
   );

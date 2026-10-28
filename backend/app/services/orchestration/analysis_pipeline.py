@@ -53,8 +53,15 @@ from app.services.evidence.evidence_service import EvidenceService
 from app.services.evidence.report_generator import ReportGenerator
 from app.services.detection.detection_container import get_detection_container
 from app.services.fusion.evidence_fusion import fuse
+from app.services.detection.engine.video_keyframes import with_keyframe_variants
 
 logger = logging.getLogger(__name__)
+
+
+def advisory_detectors() -> set[str]:
+    """The AI-generation detectors that are shown but never vote: the configured
+    ones and the keyframe detectors that run them on video."""
+    return with_keyframe_variants(settings.ai_generation_advisory_detectors)
 
 _COMPLETE_NEGATIVE = {
     Assessment.CLEAN.value,
@@ -1071,6 +1078,29 @@ class AnalysisPipeline:
         # that disagrees is evidence about how far either can be trusted, and
         # it is reported rather than averaged or outvoted.
         entries = [AnalysisPipeline._ai_entry(d) for d in dets]
+        # An advisory detector is shown but never votes
+        # (settings.ai_generation_advisory_detectors), on a video's keyframes as
+        # on a still image. When nothing else ran, the branch is not decided at
+        # all -- not "inconclusive", which would read as a decider that looked.
+        advisory = advisory_detectors()
+        if all(e["detector"] in advisory for e in entries):
+            for e in entries:
+                e["public"]["voting"] = False
+            video = all(getattr(d, "media_type", None) == "video" for d in dets)
+            shown = ", ".join(e["detector"] for e in entries)
+            return {
+                **entries[0]["base"],
+                "status": "UNAVAILABLE",
+                "reason": "no voting AI-generation detector produced a score",
+                "rationale": (
+                    f"No AI-generation detector that decides this branch ran on this "
+                    f"{'video' if video else 'image'}. {shown} is shown for reference only; "
+                    "it does not decide, being markedly less accurate on the evaluation sets."
+                    + (" The deciding detector does not run on video keyframes yet, so whether "
+                       "this video was generated was not assessed." if video else "")
+                ),
+                "detectors": [e["public"] for e in entries],
+            }
         scored = [e for e in entries if e["status"] in ("AI_GENERATION_INDICATED", "NOT_INDICATED")]
         undetermined = [e for e in entries if e["status"] == "INCONCLUSIVE"]
         if not scored and undetermined:
@@ -1092,12 +1122,10 @@ class AnalysisPipeline:
                 "detectors": [e["public"] for e in entries],
             }
 
-        # An advisory detector is shown but never votes
-        # (settings.ai_generation_advisory_detectors). It does not step in when
-        # the voting detector is missing either: UnivFD, the advisory one, scored
-        # AUC 0.51 on the second benchmark, so a fallback to it would turn a
-        # missing model into a coin toss.
-        advisory = set(settings.ai_generation_advisory_detectors or ())
+        # The advisory detector does not step in when the voting detector is
+        # missing either: UnivFD, the advisory one, scored AUC 0.51 on the
+        # second benchmark, so a fallback to it would turn a missing model into
+        # a coin toss.
         voting = [e for e in scored if e["detector"] not in advisory]
         for e in entries:
             e["public"]["voting"] = e in voting
@@ -1302,7 +1330,7 @@ class AnalysisPipeline:
                     self._decide_ai_generation(detections), decision.category
                 ),
                 "evidence_fusion": fuse(
-                    detections, advisory=settings.ai_generation_advisory_detectors or ()
+                    detections, advisory=advisory_detectors()
                 ),
             })
         except Exception as exc:
@@ -1429,7 +1457,7 @@ class AnalysisPipeline:
             except (OSError, TypeError):  # no source shipped: hash the bytecode
                 parts.append(getattr(fn, "__code__", fn).co_code.hex())
         decision_settings = {
-            "ai_generation_advisory_detectors": sorted(settings.ai_generation_advisory_detectors or ()),
+            "ai_generation_advisory_detectors": sorted(advisory_detectors()),
             "bfree_threshold": settings.bfree_threshold,
             "bfree_small_input_mode": settings.bfree_small_input_mode,
             "bfree_small_input_logit_offset": settings.bfree_small_input_logit_offset,
@@ -1444,6 +1472,9 @@ class AnalysisPipeline:
             "rules_sha256": hashlib.sha256("\n".join(parts).encode("utf-8")).hexdigest(),
             "decision_settings": decision_settings,
             "advisory_detectors_vote": False,
+            # Not a decision rule, so outside the hash: whether the verdicts
+            # these rules make may be read as conclusions (verdict_state).
+            "release_state": settings.verdict_release_state,
         }
 
     @staticmethod

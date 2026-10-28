@@ -104,11 +104,18 @@ export interface Detection {
   metadata: Record<string, unknown>;
 }
 
-/** One evidence file a detector wrote, e.g. a TruFor heatmap. */
+/** One evidence file a detector wrote, e.g. a TruFor localisation map or mask. */
 export interface Artefact {
   path: string;
   sha256: string;
   media_type: string;
+  /** Mask only: the localisation value a pixel had to reach to be masked. */
+  threshold?: number;
+  /** Mask only: how it was made, in words. */
+  method?: string;
+  /** Mask only: separate masked areas, and the share of the image they cover. */
+  areas?: number;
+  masked_fraction?: number;
 }
 
 export interface FrameScore {
@@ -347,6 +354,8 @@ export interface AnalysisDetail {
   status: string;
   assessment: Category | null;
   evidence_strength: Strength | null;
+  /** ADVISORY until the verdicts pass independent evaluation; absent on older API builds. */
+  verdict_state?: { state: "ADVISORY" | "VALIDATED"; statement: string };
   created_at: string | null;
   completed_at: string | null;
   error_message: string | null;

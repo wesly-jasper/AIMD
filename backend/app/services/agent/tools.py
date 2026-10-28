@@ -149,10 +149,39 @@ def list_detections(ctx: ToolContext, analysis: AnalysisRecord, args: NoArgument
                 "score_semantics": d.score_semantics,
                 "manipulation_type": d.manipulation_type,
                 "regions": len(d.regions),
+                **_localisation(d),
             }
             for d in detections[:_MAX_ITEMS]
         ],
     }
+
+
+_MAX_REGIONS = 5
+
+
+def _localisation(d) -> dict:
+    """Where a detector placed its regions, and its mask when it wrote one.
+
+    Without this the agent saw only a region count and inferred from detector
+    names which checks could localise -- and reported "no localisation" for an
+    image the forgery model had masked.
+    """
+    out: dict = {}
+    if d.regions:
+        out["region_boxes"] = [
+            {"type": r.region_type, "confidence": r.confidence, "bbox_xywh": r.bbox}
+            for r in d.regions[:_MAX_REGIONS]
+        ]
+    mask = ((d.detector_metadata or {}).get("artefacts") or {}).get("mask")
+    if isinstance(mask, dict):
+        out["mask"] = {
+            "areas": mask.get("areas"),
+            "share_of_image": mask.get("masked_fraction"),
+            "threshold": mask.get("threshold"),
+            "meaning": "pixels where this detector's localisation output reached the threshold; "
+                       "where the model responded, not proof of editing",
+        }
+    return out
 
 
 def get_observations_and_findings(ctx: ToolContext, analysis: AnalysisRecord, args: NoArguments) -> dict:

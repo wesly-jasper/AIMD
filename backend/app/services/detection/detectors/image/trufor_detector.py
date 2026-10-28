@@ -12,7 +12,7 @@ from app.schemas.detection import (
 )
 from app.services.detection.calibration import calibrate_score
 from app.services.detection.detectors.base_detector import BaseDetector
-from app.services.evidence.heatmap_artefacts import write_heatmap_artefacts
+from app.services.evidence.heatmap_artefacts import MASK_THRESHOLD, write_heatmap_artefacts
 
 logger = logging.getLogger(__name__)
 
@@ -115,6 +115,8 @@ class TruForDetector(BaseDetector):
                     producer="trufor",
                     model_tag=(metadata.get("checkpoint_sha256") or "unknown")[:12],
                     root=self.artefacts_dir,
+                    # The cut the runner cut its regions at, so mask and regions agree.
+                    mask_threshold=float(metadata.get("threshold", MASK_THRESHOLD)),
                 )
             except Exception as exc:
                 # The score is still a valid observation without its heatmap, so
@@ -123,7 +125,7 @@ class TruForDetector(BaseDetector):
                 metadata["artefacts_error"] = type(exc).__name__
             else:
                 metadata["artefacts"] = artefacts
-                mask_path = artefacts["localization_map"]["path"]
+                mask_path = artefacts["mask"]["path"]
 
         # Parse regions into DetectionRegion instances
         regions: List[DetectionRegion] = []
@@ -137,8 +139,8 @@ class TruForDetector(BaseDetector):
                         type=r.get("type", "forgery_localization"),
                         confidence=r.get("confidence", result.get("confidence", 0.0)),
                         bbox=r.get("bbox"),
-                        # Every region points at the full-image localization map
-                        # it was cut from; the bbox says where to look in it.
+                        # Every region points at the full-image mask it is one
+                        # area of; the bbox says where to look in it.
                         mask_path=r.get("mask_path") or mask_path,
                         extra=r.get("extra"),
                     )

@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Literal, Optional
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -103,6 +103,10 @@ class Settings(BaseSettings):
     # bench2 val its AUC was 0.51. With B-Free missing, the branch is
     # UNAVAILABLE rather than decided by it (RELIABILITY_REPORT §4.11).
     ai_generation_advisory_detectors: List[str] = ["UnivFDDetector"]
+    # ADVISORY until the verdicts pass independent evaluation on the frozen
+    # holdout; only then VALIDATED. Recorded with every analysis, and shown on
+    # the result page and in every report (app.services.evidence.verdict_state).
+    verdict_release_state: Literal["ADVISORY", "VALIDATED"] = "ADVISORY"
     # Root certificates a Content Credentials signer must chain to for TRUSTED:
     # the official C2PA Trust List, installed by scripts/fetch_c2pa_trust_list.py.
     # Without it, intact manifests can only be VALID (signer not checked).

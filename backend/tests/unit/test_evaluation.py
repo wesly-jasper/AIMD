@@ -435,3 +435,29 @@ def test_flag_rate_calibration_refuses_a_detector_that_does_not_discriminate():
     with pytest.raises(ValueError):
         calibration.fit_flag_rate("CopyMoveDetector", "2", [0.8, 0.0, 0.8, 0.0],
                                   [True, True, False, False], flag_threshold=0.5, fitted_on={})
+
+
+def test_advisory_detector_does_not_decide_a_video_through_its_keyframes(monkeypatch):
+    """Regression: UnivFD is advisory on images, but its keyframe results came
+    out as "VideoKeyframeUnivFD", which the advisory list did not name, so on a
+    video the AUC-0.51 model decided the AI-generation branch on its own."""
+    from app.core.config import settings
+    from app.services.orchestration.analysis_pipeline import AnalysisPipeline, advisory_detectors
+
+    monkeypatch.setattr(settings, "ai_generation_advisory_detectors", ["UnivFDDetector"])
+    assert "VideoKeyframeUnivFD" in advisory_detectors()
+    assert "VideoKeyframeTruFor" not in advisory_detectors()
+
+    for flagged in (True, False):
+        row = _ai_row("VideoKeyframeUnivFD", flagged, 0.9 if flagged else 0.1)
+        row.media_type = "video"
+        out = AnalysisPipeline._decide_ai_generation([row])
+        assert out["status"] == "UNAVAILABLE"
+        assert out["detectors"][0]["voting"] is False
+        assert "for reference only" in out["rationale"]
+        assert "video keyframes" in out["rationale"]
+
+    # An inconclusive keyframe run is not reported as a decider that looked.
+    row = _ai_row("VideoKeyframeUnivFD", False, 0.1)
+    row.media_type, row.assessment = "video", "INCONCLUSIVE"
+    assert AnalysisPipeline._decide_ai_generation([row])["status"] == "UNAVAILABLE"

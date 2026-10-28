@@ -207,6 +207,21 @@ def _write_frames(path: Path, frames: list[_Frame], out_dir: Path) -> dict[int, 
     return written
 
 
+#: The image detector each keyframe detector runs. A keyframe result is that
+#: detector's output on a frame, so any policy set for the image detector (an
+#: advisory one never votes) holds for its keyframe results too.
+KEYFRAME_SOURCE = {
+    "VideoKeyframeTruFor": "TruForDetector",
+    "VideoKeyframeUnivFD": "UnivFDDetector",
+}
+
+
+def with_keyframe_variants(detectors) -> set[str]:
+    """The given detector names plus the keyframe detectors that run them."""
+    names = set(detectors or ())
+    return names | {k for k, source in KEYFRAME_SOURCE.items() if source in names}
+
+
 class VideoKeyframeAnalyzer:
     """
     Runs learned image detectors on a video's keyframes.

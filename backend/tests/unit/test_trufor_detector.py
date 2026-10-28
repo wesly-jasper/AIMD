@@ -204,7 +204,7 @@ def test_trufor_heatmaps_become_artefacts_not_metadata(tmp_path):
     assert "localization_map" not in result.metadata
 
     artefacts = result.metadata["artefacts"]
-    assert set(artefacts) == {"localization_map", "reliability_map", "overlay"}
+    assert set(artefacts) == {"localization_map", "mask", "reliability_map", "overlay"}
     for entry in artefacts.values():
         relative = Path(entry["path"])
         assert not relative.is_absolute()
@@ -218,8 +218,44 @@ def test_trufor_heatmaps_become_artefacts_not_metadata(tmp_path):
 
     assert "0123456789ab" in artefacts["localization_map"]["path"]
     region = result.regions[0]
-    assert region.mask_path == artefacts["localization_map"]["path"]
+    assert region.mask_path == artefacts["mask"]["path"]
     assert region.extra == {"localization_max": 0.9}
+
+
+def test_trufor_mask_covers_the_localised_area_only(tmp_path):
+    """The mask is the localisation map cut at the recorded threshold: the
+    0.9 block is masked, the rest of the image is not."""
+    image = _png(tmp_path / "input.png")
+    artefacts_dir = tmp_path / "artefacts"
+
+    result = TruForDetector(MapRunner(), artefacts_dir=artefacts_dir).detect(image)
+
+    mask = result.metadata["artefacts"]["mask"]
+    assert mask["threshold"] == 0.5
+    assert mask["areas"] == 1
+    assert "_mask_t050.png" in mask["path"]
+    with Image.open(artefacts_dir / mask["path"]) as png:
+        pixels = np.asarray(png)
+    assert set(np.unique(pixels)) <= {0, 255}
+    assert (pixels[8:24, 12:36] == 255).all()
+    assert pixels.sum() == 255 * 16 * 24
+    assert mask["masked_fraction"] == pytest.approx(16 * 24 / (32 * 48), abs=1e-6)
+
+
+def test_trufor_mask_uses_the_runners_threshold(tmp_path):
+    class HighCut(MapRunner):
+        def predict(self, file_path):
+            out = super().predict(file_path)
+            out["metadata"]["threshold"] = 0.95
+            return out
+
+    image = _png(tmp_path / "input.png")
+    result = TruForDetector(HighCut(), artefacts_dir=tmp_path / "a").detect(image)
+
+    mask = result.metadata["artefacts"]["mask"]
+    assert mask["threshold"] == 0.95
+    assert mask["areas"] == 0 and mask["masked_fraction"] == 0.0
+    assert "_mask_t095.png" in mask["path"]
 
 
 def test_trufor_heatmap_write_failure_keeps_the_score(tmp_path, monkeypatch):

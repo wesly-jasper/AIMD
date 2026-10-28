@@ -55,7 +55,7 @@ export function verdict(category: Category | null | undefined, strength: Strengt
     case "INCONCLUSIVE":
       return {
         headline: "We couldn't reach a conclusion",
-        explanation: "Not every check could run on this file, so the absence of signs can't be reported.",
+        explanation: "The checks that ran could not support a conclusion either way, so the absence of signs can't be reported.",
         tone: "unsure",
       };
     default:

@@ -241,3 +241,22 @@ def test_disabled_or_keyless_agent_never_builds_a_client(db, monkeypatch):
     monkeypatch.setattr(settings, "agent_enabled", False)
     outcome = NemotronAgent(client_factory=no_client).investigate(db, seed_analysis(), TEST_USERNAME)
     assert outcome.status == "UNAVAILABLE" and "disabled" in outcome.error
+
+
+def test_detections_tell_the_agent_where_a_detector_localised():
+    """Regression: the agent saw only a region count and reported "no
+    localisation" for an image the forgery model had masked."""
+    region = SimpleNamespace(region_type="forgery_localization", confidence=0.9, bbox=[78, 3, 15, 18])
+    trufor = SimpleNamespace(regions=[region], detector_metadata={
+        "secret": "not for the model",
+        "artefacts": {"mask": {"path": "trufor/x_mask_t050.png", "sha256": "ab", "areas": 1,
+                               "masked_fraction": 0.06, "threshold": 0.5}},
+    })
+    out = agent_tools._localisation(trufor)
+    assert out["region_boxes"] == [{"type": "forgery_localization", "confidence": 0.9, "bbox_xywh": [78, 3, 15, 18]}]
+    assert out["mask"]["areas"] == 1 and out["mask"]["share_of_image"] == 0.06
+    assert "not proof" in out["mask"]["meaning"]
+    # Only the stated fields: no paths, hashes or other metadata reach the model.
+    assert "not for the model" not in json.dumps(out) and "path" not in out["mask"]
+
+    assert agent_tools._localisation(SimpleNamespace(regions=[], detector_metadata=None)) == {}

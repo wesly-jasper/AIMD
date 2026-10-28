@@ -16,7 +16,7 @@ from __future__ import annotations
 import hashlib
 import os
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import cv2
 import numpy as np
@@ -25,6 +25,39 @@ from PIL import Image
 from app.core.config import settings
 
 OVERLAY_ALPHA = 0.45
+#: Localisation value at or above which a pixel is masked. TruFor's maps are a
+#: per-pixel softmax, and 0.5 is the cut its authors binarise at.
+MASK_THRESHOLD = 0.5
+#: Connected areas smaller than this share of the image are dropped as speckle.
+MASK_MIN_AREA_FRACTION = 0.001
+#: How the mask is made, recorded beside it so a reader can reproduce it.
+MASK_METHOD = (
+    "localisation >= threshold, opened then closed with a 5x5 rectangle, "
+    "areas under 0.1% of the image dropped"
+)
+
+
+def region_mask(
+    localization: np.ndarray, threshold: float = MASK_THRESHOLD
+) -> Tuple[np.ndarray, List[np.ndarray]]:
+    """
+    The binary mask of the localised areas and the outer contour of each.
+
+    The mask (uint8, 0 or 255) and the regions a runner reports come from this one
+    function, so every masked area is a reported region and every reported
+    region is masked. Holes inside an area stay unmasked.
+    """
+    h, w = localization.shape[:2]
+    binary = (localization >= threshold).astype(np.uint8) * 255
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
+    binary = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel)
+    binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel)
+    contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    min_area = h * w * MASK_MIN_AREA_FRACTION
+    kept = [c for c in contours if cv2.contourArea(c) >= min_area]
+    keep = np.zeros_like(binary)
+    cv2.drawContours(keep, kept, -1, 255, thickness=cv2.FILLED)
+    return cv2.bitwise_and(binary, keep), kept
 
 
 def sha256_bytes_of(path: Path) -> str:
@@ -66,6 +99,7 @@ def write_heatmap_artefacts(
     model_tag: str,
     input_sha256: Optional[str] = None,
     root: Optional[Path] = None,
+    mask_threshold: float = MASK_THRESHOLD,
 ) -> Dict[str, Dict[str, Any]]:
     """
     Write a localization map (and its reliability map) as PNG evidence.
@@ -73,11 +107,13 @@ def write_heatmap_artefacts(
     Produces, below ``<root>/<producer>/``:
 
       * ``*_localization.png`` -- the map itself, grayscale, value * 255
+      * ``*_mask.png``         -- the localised areas (``region_mask``), 0 or 255;
+                                  the threshold and method are recorded with it
       * ``*_reliability.png``  -- the reliability map, same encoding
       * ``*_overlay.png``      -- the localization map colour-mapped over the image,
                                   for reading, not measurement
 
-    Returns ``{kind: {path, sha256, media_type}}`` with paths relative to ``root``.
+    Returns ``{kind: {path, sha256, media_type, ...}}`` with paths relative to ``root``.
     """
     root = Path(root or settings.artefacts_dir)
     input_sha256 = input_sha256 or sha256_bytes_of(image_path)
@@ -85,6 +121,16 @@ def write_heatmap_artefacts(
 
     loc_u8 = _to_u8(localization_map)
     artefacts = {"localization_map": _write_png(root, f"{stem}_localization.png", loc_u8)}
+
+    mask, areas = region_mask(np.asarray(localization_map, dtype=np.float32), mask_threshold)
+    # The threshold is part of the file's name: a different cut is different evidence.
+    artefacts["mask"] = {
+        **_write_png(root, f"{stem}_mask_t{round(mask_threshold * 100):03d}.png", mask),
+        "threshold": mask_threshold,
+        "method": MASK_METHOD,
+        "areas": len(areas),
+        "masked_fraction": round(float(np.count_nonzero(mask)) / mask.size, 6),
+    }
 
     if reliability_map is not None:
         artefacts["reliability_map"] = _write_png(

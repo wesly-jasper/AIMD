@@ -11,6 +11,7 @@ import json
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
+from app.services.evidence.verdict_state import verdict_state
 
 class ReportGenerator:
     """
@@ -38,6 +39,9 @@ class ReportGenerator:
         # Ordinal, not numeric. The former "Composite Confidence: 42.00%" was a
         # mean of incomparable detector scores formatted as a probability.
         evidence_strength = evidence_package.get("evidence_strength") or "NOT_ASSESSED"
+        state = evidence_package.get("verdict_state") or verdict_state(
+            (evidence_package.get("run") or {}).get("config_snapshot")
+        )
 
         lines = [
             "# AIMD FORENSIC ANALYSIS REPORT",
@@ -50,6 +54,8 @@ class ReportGenerator:
             "---",
             "",
             "## 1. Executive Summary & Verdict",
+            "",
+            f"> **{state['state']} [UNCERTAINTY]:** {state['statement']}",
             "",
             f"- **Forensic Assessment:** **`{verdict}`**",
             f"- **Evidence Strength:** `{evidence_strength}` "
@@ -191,6 +197,17 @@ class ReportGenerator:
                         t_start = r.get("start_timestamp")
                         loc_str = f"bbox={bbox}" if bbox else (f"time={t_start}s" if t_start is not None else "")
                         lines.append(f"  - `{r_type}` (confidence: {r_conf:.2%}{', ' + loc_str if loc_str else ''})")
+                mask = (meta_det.get("artefacts") or {}).get("mask")
+                if isinstance(mask, dict):
+                    # The file the result page draws, named with its hash so a
+                    # reader can check the copy they are given is the one stored.
+                    lines.append(
+                        f"- **Manipulation mask [OBSERVATION]:** {mask.get('areas')} area(s), "
+                        f"{(mask.get('masked_fraction') or 0):.1%} of the image, where the "
+                        f"localisation output reached {mask.get('threshold')} "
+                        f"({mask.get('method')}). File `{mask.get('path')}`, "
+                        f"sha256 `{mask.get('sha256')}`. Where the model responded, not proof of editing."
+                    )
                 lines.append("")
         else:
             lines.append("No active detection modules produced findings.\n")

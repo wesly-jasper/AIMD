@@ -78,6 +78,9 @@ def test_full_pipeline_image():
         assert d["availability"] in ("AVAILABLE", "UNAVAILABLE")
         assert d["execution_status"] in ("COMPLETED", "INCONCLUSIVE", "FAILED", "SKIPPED")
     assert get_data["assessment_detail"]["category"] == get_data["assessment"]
+    # Advisory until the verdicts pass independent evaluation.
+    assert get_data["verdict_state"]["state"] == "ADVISORY"
+    assert get_data["run"]["config_snapshot"]["verdict_policy"]["release_state"] == "ADVISORY"
 
     # 5. Stages with no route of their own still persisted their output.
     _assert_stage_records(analysis_id)

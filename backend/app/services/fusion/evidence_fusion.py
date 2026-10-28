@@ -265,8 +265,10 @@ def _statement(branch: str, fused: dict[str, Any]) -> str:
     if fused["status"] in ("SUPPORTS", "AGAINST"):
         direction = "if" if fused["status"] == "SUPPORTS" else "if not"
         lo, hi = (low, high) if fused["status"] == "SUPPORTS" else (-high, -low)
+        # One counted family has no dependence range: "between 183 and 183" said nothing.
+        ratio = fmt(lo) if fmt(lo) == fmt(hi) else f"between {fmt(lo)} and {fmt(hi)}"
         text = (
-            f"The detector outputs are between {fmt(lo)} and {fmt(hi)} times more "
+            f"The detector outputs are {ratio} times more "
             f"probable {direction} the image was {what} than {'if not' if direction == 'if' else 'if so'} "
             f"({fused['strength']} support). "
         )
@@ -275,8 +277,10 @@ def _statement(branch: str, fused: dict[str, Any]) -> str:
     else:
         text = "The detector outputs barely discriminate (limited support either way). "
     text += (
-        "The range runs from treating the signal families as fully dependent to "
-        "treating them as independent; the strength is graded on the cautious end "
+        ("The range runs from treating the signal families as fully dependent to "
+         "treating them as independent; the strength" if fmt(low) != fmt(high)
+         else "Only one signal family counted, so there is no dependence range; the strength")
+        + " is graded on the cautious end "
         "of each ratio's uncertainty interval. Likelihood ratios hold for files like "
         "the validation data the calibrations were fitted on."
     )

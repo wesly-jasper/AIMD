@@ -31,6 +31,7 @@ from app.services.provenance.timeline import build_timeline
 from app.schemas.detection import AnalysisRequest, AnalysisResponse, InvestigationRequest
 from app.services.audit.audit_log import AuditAction, record_event
 from app.services.evidence.report_html import render_report_html
+from app.services.evidence.verdict_state import verdict_state
 from app.services.evidence.report_investigation import investigation_json, investigation_markdown
 from app.services.orchestration.analysis_pipeline import AnalysisPipeline
 
@@ -156,6 +157,8 @@ def get_analysis(
         "status": analysis.status,
         "assessment": analysis.assessment,
         "evidence_strength": analysis.evidence_strength,
+        # ADVISORY until the verdicts pass independent evaluation.
+        "verdict_state": verdict_state(analysis.config_snapshot),
         "suspicious_segments": suspicious_segments,
         "created_at": analysis.created_at.isoformat() if analysis.created_at else None,
         "completed_at": analysis.completed_at.isoformat() if analysis.completed_at else None,

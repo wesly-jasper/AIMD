@@ -6,7 +6,7 @@ import { WhatWeChecked } from "../components/Coverage";
 import { EvidenceView, regionsOf } from "../components/Evidence";
 import { ContentCredentialsCard } from "../components/Credentials";
 import { InvestigationCard } from "../components/Investigation";
-import { BranchCards, EvidenceStrengthCard, HeatmapCard, ProvenanceCard, SourcesCard, VideoTimeline } from "../components/Panels";
+import { BranchCards, EvidenceStrengthCard, MaskCard, ProvenanceCard, SourcesCard, VideoTimeline } from "../components/Panels";
 import { ReportCard } from "../components/Report";
 import { Shell } from "../components/Shell";
 import { POLARITY, SEMANTICS, count, dateTime, duration, familyLabel, score } from "../format";
@@ -158,8 +158,16 @@ export function Result() {
         <section className={"card span-5 verdict-card " + v.tone} aria-labelledby="verdict-h">
           {!d ? <><Skeleton w="70%" h={26} /><p><Skeleton w="90%" /></p></> : (
             <>
+              {finished && (d.verdict_state?.state ?? "ADVISORY") === "ADVISORY" && (
+                <span className="pill advisory">Advisory · not yet independently validated</span>
+              )}
               <h2 id="verdict-h" className="verdict">{v.headline}</h2>
               <p className="explanation">{v.explanation}</p>
+              {finished && (
+                <p className="advisory-note">
+                  {d.verdict_state?.statement ?? "Experimental, advisory result. AIMD's verdicts have not yet passed independent evaluation, so this result supports an examiner's review and must not be relied on as a forensic conclusion on its own."}
+                </p>
+              )}
               {failed ? (
                 <>
                   <div className="error-block run-failed" role="alert">
@@ -187,7 +195,7 @@ export function Result() {
           <EvidenceStrengthCard fusion={d.evidence_fusion} />
           {d.media_type === "image" ? (
             <div className="grid">
-              <HeatmapCard analysisId={d.analysis_id} mediaId={d.media_id} detections={d.detections} />
+              <MaskCard analysisId={d.analysis_id} mediaId={d.media_id} detections={d.detections} observations={d.observations} />
               <div className="span-5"><ProvenanceCard d={d} /></div>
             </div>
           ) : (

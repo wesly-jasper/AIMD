@@ -253,6 +253,24 @@ def test_runner_regions_come_from_the_localization_map(tmp_path):
     assert regions[0]["extra"]["reliability_mean"] == pytest.approx(0.7)
 
 
+def test_mask_and_regions_are_the_same_areas():
+    """A speckle too small to be a region is not masked either."""
+    from app.services.evidence.heatmap_artefacts import region_mask
+
+    loc = np.zeros((100, 100), dtype=np.float32)
+    loc[20:60, 30:80] = 0.9
+    loc[90:93, 5:8] = 0.9  # 9 px, removed by the 5x5 opening
+    loc[70:73, 50:55] = 0.4  # below the cut
+
+    mask, areas = region_mask(loc, 0.5)
+    regions = TruForRunner._regions(loc, np.ones_like(loc), 0.5)
+
+    assert len(areas) == len(regions) == 1
+    assert (mask > 0).sum() == 40 * 50
+    assert mask[20:60, 30:80].min() == 255
+    assert mask[90:93, 5:8].max() == 0 and mask[70:73, 50:55].max() == 0
+
+
 # ── Tiled inference ──────────────────────────────────────────────────────────
 
 def _tiled_fake_runner(root: Path, builder=HeadedFakeTruFor, pooling=None) -> TruForRunner:
