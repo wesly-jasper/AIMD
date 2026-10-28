@@ -80,7 +80,7 @@ def test_calibrate_refuses_locked_files_under_another_split(tmp_path):
     run.mkdir()
     (run / "run.json").write_text("{}")
     (run / "predictions.jsonl").write_text(json.dumps({"id": "f0", "split": "val"}) + "\n")
-    args = type("A", (), {"run": [str(run)], "split": "val", "lock": str(lock_path),
+    args = type("A", (), {"run": [str(run)], "manifest": None, "split": "val", "lock": str(lock_path),
                           "out": str(tmp_path / "c.json"), "target_fpr": 0.05})
     assert cli.cmd_calibrate(args) == 1
 
@@ -103,7 +103,7 @@ def test_calibrate_merges_runs_and_counts_re_encoded_copies_once(tmp_path):
         (run / "predictions.jsonl").write_text("\n".join(json.dumps(r) for r in rows) + "\n")
         runs.append(str(run))
     out = tmp_path / "cal.json"
-    args = type("A", (), {"run": runs, "split": "val", "lock": str(tmp_path / "none.json"),
+    args = type("A", (), {"run": runs, "manifest": None, "split": "val", "lock": str(tmp_path / "none.json"),
                           "out": str(out), "target_fpr": 0.2})
     assert cli.cmd_calibrate(args) == 0
     saved = json.loads(out.read_text())

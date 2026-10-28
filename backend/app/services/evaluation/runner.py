@@ -142,6 +142,8 @@ def predict_item(item: EvalItem, engine: ImageDetectionEngine, video_engine: Any
             "ai_generation": {k: v for k, v in ai.items() if k not in ("rationale", "limitations")},
         }
         for r in results:
+            if "image_size" not in record and isinstance(r.metadata.get("image_size"), (list, tuple)):
+                record["image_size"] = list(r.metadata["image_size"])
             record["detectors"][r.detector] = {
                 "availability": r.availability.value,
                 "execution_status": r.execution_status.value,

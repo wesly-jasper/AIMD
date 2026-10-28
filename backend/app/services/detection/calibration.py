@@ -148,15 +148,23 @@ class Calibration:
     fitted_on: dict[str, Any]
     validation: dict[str, Any]
     created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    #: What the fitting data looked like; outside it, the fit was never tested.
+    #: ``min_short_side``: the 5th percentile of the fitting images' shorter side.
+    coverage: dict[str, Any] = field(default_factory=dict)
+    #: (a, b) refitted on resamples of the fitting data (whole groups at a
+    #: time), so a likelihood ratio can carry an interval, not just a value.
+    bootstrap: list[list[float]] = field(default_factory=list)
 
-    def probability(self, raw: float) -> float:
+    def probability(self, raw: float, params: Optional[Sequence[float]] = None) -> float:
+        """P(positive | raw) at the fitting set's prior; ``params`` = (a, b) overrides the fit."""
+        a, b = params if params is not None else (self.a, self.b)
         if self.method == FLAG_RATE:
             # a = P(flag | positive), b = P(flag | negative), both smoothed; the
             # score only says which side of ``threshold`` the detector came down.
-            lr = self.a / self.b if raw >= self.threshold else (1 - self.a) / (1 - self.b)
+            lr = a / b if raw >= self.threshold else (1 - a) / (1 - b)
             odds = lr * self.prior / (1 - self.prior)
             return float(odds / (1 + odds))
-        return float(_sigmoid(self.a * _logit(np.asarray([raw], dtype=float)) + self.b)[0])
+        return float(_sigmoid(a * _logit(np.asarray([raw], dtype=float)) + b)[0])
 
     def provenance(self) -> dict[str, Any]:
         """What a result carries so a reader can check how its number was made."""
@@ -171,6 +179,43 @@ class Calibration:
         }
 
 
+#: Bootstrap resamples per calibration; enough for a 5th-95th percentile interval.
+BOOTSTRAP = 200
+#: Percentile of the fitting images' short side recorded as the coverage floor.
+COVERAGE_PERCENTILE = 5
+
+
+def _coverage(short_sides: Optional[Sequence[Optional[int]]]) -> dict[str, Any]:
+    sides = [int(s) for s in (short_sides or []) if s]
+    if not sides:
+        return {}
+    return {"min_short_side": int(np.percentile(sides, COVERAGE_PERCENTILE)),
+            "short_side_percentile": COVERAGE_PERCENTILE, "images_with_size": len(sides)}
+
+
+def _bootstrap(fit_one, scores, targets, groups, *, n: int = BOOTSTRAP, seed: int = 0) -> list[list[float]]:
+    """``fit_one`` refitted on ``n`` resamples that draw whole groups, so the
+    re-encoded copies of one image (one group) count as one draw."""
+    rng = np.random.default_rng(seed)
+    scores, targets = np.asarray(scores, dtype=float), np.asarray(targets, dtype=bool)
+    groups = np.asarray(groups if groups is not None else np.arange(len(scores)))
+    names = np.unique(groups)
+    index = {g: np.nonzero(groups == g)[0] for g in names}
+    out = []
+    for _ in range(n):
+        rows = np.concatenate([index[g] for g in rng.choice(names, size=len(names), replace=True)])
+        y = targets[rows]
+        if y.all() or not y.any():
+            continue
+        try:
+            a, b = fit_one(scores[rows], y)
+        except ValueError:
+            continue
+        if math.isfinite(a) and math.isfinite(b):
+            out.append([round(float(a), 6), round(float(b), 6)])
+    return out
+
+
 def fit(
     detector: str,
     detector_version: str,
@@ -179,6 +224,9 @@ def fit(
     *,
     target_fpr: float,
     fitted_on: dict[str, Any],
+    groups: Optional[Sequence[Any]] = None,
+    short_sides: Optional[Sequence[Optional[int]]] = None,
+    bootstrap: int = BOOTSTRAP,
 ) -> Calibration:
     a, b = fit_platt(scores, targets)
     if not (math.isfinite(a) and math.isfinite(b)) or abs(a) > MAX_SLOPE or a <= 0:
@@ -209,6 +257,8 @@ def fit(
             "ece_raw": round(expected_calibration_error(raw, y), 4),
             "ece_calibrated": round(expected_calibration_error(probs, y), 4),
         },
+        coverage=_coverage(short_sides),
+        bootstrap=_bootstrap(lambda s, t: fit_platt(s, t), scores, targets, groups, n=bootstrap),
     )
 
 
@@ -220,11 +270,20 @@ def fit_flag_rate(
     *,
     flag_threshold: float,
     fitted_on: dict[str, Any],
+    groups: Optional[Sequence[Any]] = None,
+    short_sides: Optional[Sequence[Optional[int]]] = None,
+    bootstrap: int = BOOTSTRAP,
 ) -> Calibration:
     """
     Flag rates among positives and negatives, with add-one-half smoothing, so a
     detector that never fired on the negatives gets a large but finite ratio.
     """
+
+    def rates(s, t):
+        f = np.asarray(s, dtype=float) >= flag_threshold
+        t = np.asarray(t, dtype=bool)
+        return (int(f[t].sum()) + 0.5) / (int(t.sum()) + 1), (int(f[~t].sum()) + 0.5) / (int((~t).sum()) + 1)
+
     y = np.asarray(targets, dtype=bool)
     flagged = np.asarray(scores, dtype=float) >= flag_threshold
     if y.all() or not y.any():
@@ -243,6 +302,8 @@ def fit_flag_rate(
         fitted_on={**fitted_on, "positives": int(y.sum()), "negatives": int((~y).sum())},
         validation={"fpr": round(fp / max(1, int((~y).sum())), 4),
                     "recall": round(tp / max(1, int(y.sum())), 4)},
+        coverage=_coverage(short_sides),
+        bootstrap=_bootstrap(rates, scores, targets, groups, n=bootstrap),
     )
 
 

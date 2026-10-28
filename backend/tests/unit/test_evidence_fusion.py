@@ -105,3 +105,47 @@ def test_cap_counts_distinct_originals_not_their_copies():
     cal = _cal("BFreeDetector", a=20.0, negatives=600)
     cal.fitted_on["independent_negatives"] = 99
     assert likelihood_ratio(cal, 0.999)["log10_lr"] == pytest.approx(2.0)
+
+
+def _sized(row, width, height):
+    row.detector_metadata = {"image_size": [width, height]}
+    return row
+
+
+def test_image_below_the_calibration_coverage_gives_direction_only():
+    cal = _cal("BFreeDetector")
+    cal.coverage = {"min_short_side": 256}
+    out = fuse([_sized(_row("BFreeDetector", 0.95, True), 400, 200)], calibrations={"BFreeDetector": cal})
+    a = out["ai_generation"]
+    assert a["status"] == "NOT_ASSESSED" and a["outside_coverage"] == ["BFreeDetector"]
+    assert a["contributions"][0]["log10_lr"] is None and a["contributions"][0]["direction"] == 1
+    assert "smaller than the files the calibrations were fitted on" in a["statement"]
+
+
+def test_image_at_the_coverage_floor_is_quantified():
+    cal = _cal("BFreeDetector")
+    cal.coverage = {"min_short_side": 256}
+    out = fuse([_sized(_row("BFreeDetector", 0.95, True), 400, 256)], calibrations={"BFreeDetector": cal})
+    assert out["ai_generation"]["status"] == "SUPPORTS"
+
+
+def test_strength_comes_from_the_cautious_end_of_the_interval():
+    cal = _cal("BFreeDetector", a=4.0)
+    point = likelihood_ratio(cal, 0.95)["log10_lr"]
+    # Refits with shallower slopes: the data cannot pin the ratio down.
+    cal.bootstrap = [[slope, 0.0] for slope in (1.5, 2.0, 3.0, 4.0, 5.0)]
+    lr = likelihood_ratio(cal, 0.95)
+    low, high = lr["log10_lr_interval"]
+    assert low < point <= high
+    a = fuse([_row("BFreeDetector", 0.95, True)], calibrations={"BFreeDetector": cal})["ai_generation"]
+    assert a["log10_lr_dependent"] == pytest.approx(point, abs=1e-3)
+    assert a["log10_lr_cautious"][0] == pytest.approx(low, abs=1e-3)
+    assert a["strength"] == verbal(low) != verbal(point)
+
+
+def test_an_interval_that_spans_zero_is_limited():
+    cal = _cal("BFreeDetector", a=4.0)
+    cal.bootstrap = [[slope, 0.0] for slope in (-1.0, 2.0, 4.0, 6.0)]
+    a = fuse([_row("BFreeDetector", 0.95, True)], calibrations={"BFreeDetector": cal})["ai_generation"]
+    assert a["log10_lr_dependent"] > 1
+    assert a["status"] == "LIMITED" and a["strength"] == "limited"

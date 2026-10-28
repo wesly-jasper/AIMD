@@ -235,6 +235,27 @@ def _original_of(record: dict) -> str:
     return record["id"].rsplit(".", 1)[0]
 
 
+def _manifest_sizes(manifests: list[str], ids: set[str]) -> dict[str, list[int]]:
+    """Image sizes, read from the files, for records saved before runs kept them."""
+    from PIL import Image
+
+    sizes: dict[str, list[int]] = {}
+    for path in map(Path, manifests):
+        for item in load_manifest(path):
+            if item.id in ids and item.id not in sizes:
+                try:
+                    with Image.open(item.path) as img:
+                        sizes[item.id] = list(img.size)
+                except OSError:
+                    continue
+    return sizes
+
+
+def _short_side(record: dict, sizes: dict[str, list[int]]):
+    size = record.get("image_size") or sizes.get(record["id"])
+    return min(size) if size else None
+
+
 def cmd_calibrate(args) -> int:
     from app.services.detection import calibration
     from app.services.evaluation.metrics import BRANCH_DETECTORS
@@ -261,6 +282,7 @@ def cmd_calibrate(args) -> int:
               f"in this run (e.g. {leaked[0]})")
         return 1
     infos = [json.loads((d / "run.json").read_text(encoding="utf-8")) for d in run_dirs]
+    sizes = _manifest_sizes(args.manifest or [], {r["id"] for r in records if "image_size" not in r})
     fitted = {}
     for branch, detector in [(b, d) for b, ds in BRANCH_DETECTORS.items() for d in ds]:
         rows = [
@@ -272,10 +294,13 @@ def cmd_calibrate(args) -> int:
             # it; fitting on it would credit the detector with silence it never had.
             and r["detectors"][detector].get("execution_status", "COMPLETED") == "COMPLETED"
         ]
-        originals = [_original_of(r) for r in records
-                     if r["targets"].get(branch) is not None
-                     and r["detectors"].get(detector, {}).get("raw_score") is not None
-                     and r["detectors"][detector].get("execution_status", "COMPLETED") == "COMPLETED"]
+        used = [r for r in records
+                if r["targets"].get(branch) is not None
+                and r["detectors"].get(detector, {}).get("raw_score") is not None
+                and r["detectors"][detector].get("execution_status", "COMPLETED") == "COMPLETED"]
+        originals = [_original_of(r) for r in used]
+        groups = [r.get("group") or _original_of(r) for r in used]
+        short_sides = [_short_side(r, sizes) for r in used]
         versions = {v for _, _, v in rows}
         if len(versions) != 1:
             print(f"{detector}: skipped ({len(rows)} scored rows, versions {sorted(map(str, versions))})")
@@ -293,11 +318,12 @@ def cmd_calibrate(args) -> int:
                 "independent_positives": len({o for o, (_, t, _) in zip(originals, rows) if t}),
                 "independent_negatives": len({o for o, (_, t, _) in zip(originals, rows) if not t}),
             }
+            extra = {"groups": groups, "short_sides": short_sides}
             if detector in calibration.FLAG_RATE_DETECTORS:
                 cal = calibration.fit_flag_rate(detector, versions.pop(), scores, targets,
-                                                flag_threshold=0.5, fitted_on=fitted_on)
+                                                flag_threshold=0.5, fitted_on=fitted_on, **extra)
             else:
-                cal = calibration.fit(detector, versions.pop(), scores, targets,
+                cal = calibration.fit(detector, versions.pop(), scores, targets, **extra,
                                       target_fpr=args.target_fpr, fitted_on=fitted_on)
         except ValueError as exc:
             print(f"{detector}: not calibrated -- {exc}")
@@ -306,6 +332,8 @@ def cmd_calibrate(args) -> int:
             print(f"{detector}: warning -- calibration error rose on {args.split} "
                   f"({cal.validation['ece_raw']} -> {cal.validation['ece_calibrated']})")
         fitted[detector] = cal
+        print(f"{detector}: coverage {cal.coverage or 'unknown (no image sizes)'}, "
+              f"{len(cal.bootstrap)} bootstrap refits")
         print(f"{detector} [{cal.method}]: a={cal.a:.3f} b={cal.b:.3f} threshold={cal.threshold:.4f} "
               f"validation={cal.validation} n={cal.fitted_on['positives']}+/{cal.fitted_on['negatives']}- "
               f"({cal.fitted_on['independent_positives']}+/{cal.fitted_on['independent_negatives']}- independent)")
@@ -363,6 +391,7 @@ def main() -> int:
 
     p = sub.add_parser("calibrate", help="fit calibration on runs' validation split")
     p.add_argument("run", nargs="+", help="one or more run directories, merged by file id")
+    p.add_argument("--manifest", nargs="*", help="manifests to read image sizes from, for runs that did not record them")
     p.add_argument("--out", required=True)
     p.add_argument("--split", default="val")
     p.add_argument("--target-fpr", type=float, default=0.05)
