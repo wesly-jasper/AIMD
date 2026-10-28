@@ -1,0 +1,4 @@
+# Calibration files are checksummed (SHA256SUMS): store them byte for byte, never
+# convert line endings, or a fresh checkout fails its own checksum.
+backend/calibration/*.json -text
+backend/calibration/SHA256SUMS -text
