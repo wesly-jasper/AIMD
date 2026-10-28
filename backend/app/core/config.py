@@ -90,9 +90,12 @@ class Settings(BaseSettings):
     bfree_threshold: float = 0.5
     # Inputs with a side under 504 px: "tile" (the authors' wrapper) or
     # "upscale" (enlarge to 504, then add bfree_small_input_logit_offset to the
-    # logit). See RELIABILITY_REPORT §4.7 for the measurements behind both.
-    bfree_small_input_mode: str = "tile"
-    bfree_small_input_logit_offset: float = 0.0
+    # logit). See RELIABILITY_REPORT §4.7 and §4.10 for the measurements behind
+    # both. The offset holds tile mode's false-positive rate on every small
+    # bench2 val input (resized, social, small originals); checked on the
+    # holdout, bench3 val and OpenFake.
+    bfree_small_input_mode: str = "upscale"
+    bfree_small_input_logit_offset: float = 1.90
     # AI-generation detectors that are reported but never vote. UnivFD: on the
     # evaluation test split (2026-10-27) it found 4/55 generated images (AUC
     # 0.63) and flagged 13/36 edited photographs, so its disagreement with

@@ -362,6 +362,190 @@ Recompression and cropping barely matter. Downscaling is the damaging transform:
 
 **What did not change.** B-Free's verdict threshold stays 0.5: 55% recall at 1% false positives on the holdout. The calibrated threshold (64% at 2.6%) is available through `CALIBRATION_PATH`. Choosing it is a product decision about false positives, not a measurement.
 
+### 4.7 Why downscaling hurts B-Free (2026-10-28)
+
+**Method.** The bench2 **validation** originals (124 AI, 86 real) were scored again under controlled variants, through the same B-Free preprocessing (five 504 px crops, no resize). Threshold logit 0. The holdout was not used.
+
+| Variant | What it isolates | Recall | False positives | AUC |
+|---|---|---|---|---|
+| Original | | 58% | 1.2% | 0.926 |
+| JPEG q90, full size | recompression alone | 60% | 1.2% | 0.927 |
+| Crop to the resized size | fewer pixels, no resampling | 59% | 2.3% | 0.920 |
+| Half size, lossless PNG | resampling, no recompression | 44% | 0% | 0.861 |
+| Resize to 50% (bench2 transform) | | 44% | 2.3% | 0.846 |
+| Resize to 50%, then reflect-padded instead of tiled | B-Free's small-input wrap | 52% | 2.3% | 0.861 |
+| Resize to 50%, then upscaled back to 504 px | resolution-aware preprocessing | 44% | 1.2% | 0.912 |
+
+- **Resampling is the cause.** Losing pixels (the crop) and recompression change nothing. Resampling the same picture to half size costs 14 points of recall even when saved losslessly.
+- **The traces are smoothed away, and real photos look sharper.** Halving moves AI logits down by about 0.64 and real logits up by about 0.69. Laplacian variance (a sharpness measure) shows why: real photos fall from 2,934 to 2,327, and AI images *rise* from 1,050 to 1,637. Downscaling makes them look alike.
+- **Per generator** (original → resized): Stable Diffusion 94% → 61%, Midjourney 86% → 62%.
+- **Upscaling small inputs restores the ranking but not the threshold.** Bicubic upscaling to 504 px lifts AUC (0.846 → 0.912), but every logit shifts, so it needs its own offset. Split by group hash: AUC rose on both halves (dev 0.816 → 0.885, check 0.877 → 0.931). With an operating point fitted on dev at 2% false positives, recall on the check half was 72%, against 49% for the tiled default.
+- **The offset is not yet stable.** Fitted on all of val it is +0.67; fitted on the dev half, +2.63. Reflect-padding was rejected: its gain was inconsistent between halves, and false positives rose.
+
+**Decision.** Upscale mode is implemented and versioned (`BFREE_SMALL_INPUT_MODE=upscale`, `BFREE_SMALL_INPUT_LOGIT_OFFSET`). The detector version gains `.up504o±x.xx`, so a calibration fitted in one mode is never applied to the other. The default stayed **tile** until the offset was fitted on more Commons reals and confirmed on a differently sourced set. Both are now done, and the default is upscale with offset +2.31 (§4.10). A dedicated low-resolution model was not tested here, because none is installed. SPAI (CVPR 2025) is the obvious candidate; check its licence first.
+
+Every B-Free result now records `image_size`, `input_condition` (`full_size`, `small_tiled` or `small_upscaled`), `raw_logit` and `logit_offset`, so a report says which path a file took.
+
+### 4.8 Calibration reliability: coverage and uncertainty (2026-10-28)
+
+**The question.** On the old test split, Cllr for AI generation rose from 0.57 (holdout) to 0.65. Decomposed with the pool-adjacent-violators bound (Cllr = discrimination + calibration loss):
+
+| Collection, branch | Cllr | Discrimination | Calibration loss |
+|---|---|---|---|
+| Old test, manipulation | 0.813 | 0.752 | 0.061 |
+| Old test, AI generation | 0.647 | 0.528 | 0.119 |
+| bench2 val, AI generation (fitted on) | 0.527 | 0.503 | 0.024 |
+| bench2 holdout, AI generation | 0.572 | 0.536 | 0.036 |
+
+B-Free discriminates as well on the old test as on the holdout (0.528 against 0.536). **The whole rise is calibration loss**: the ratios were miscalibrated for that collection. Among the old test's real files, the 256 px COCO JPEGs averaged log10 LR −0.16, against −0.46 (camera photos) and −0.52 (COCO PNG). They were misleading by 10× two to four times as often: 5.9% against 1.5–2.8%.
+
+**What changed (calibration file v3).**
+- **Uncertainty.** Each calibration carries 200 bootstrap refits that resample whole groups, so the re-encoded copies of one image count as one draw. Each LR gets a 5th–95th percentile interval. **Status and verbal strength now come from the end of that interval nearer 1.** If the interval crosses 1, the result is LIMITED.
+- **Coverage.** Each calibration records the 5th percentile of its fitting images' short side. A file below that floor gets the detector's direction only, never a number, and the statement says why.
+- **Per-condition calibration was tested and rejected.** Separate B-Free fits for small (< 504 px, tiled) and full-size inputs changed Cllr by less than 0.015 on every collection (old test 0.646 → 0.641; holdout 0.572 → 0.570). The pooled fit stays.
+
+**Do the labels hold?** For each label, the empirical LR is (share of AI images with that label) ÷ (share of real files with it). A "moderate" label claims 10–100.
+
+| Label | v2: old test | v3: old test | v2: holdout | v3: holdout |
+|---|---|---|---|---|
+| SUPPORTS moderate | **8.7** (11 AI / 4 real) | 41 (26 / 2) | 210 | ∞ (401 / 0) |
+| SUPPORTS moderately strong | **73** (23 / 1) | ∞ (7 / 0) | ∞ | ∞ (102 / 0) |
+| AGAINST moderate | **0.14** (1 / 22) | 0 (0 / 6) | 0.19 | 0.23 |
+| Cllr (cautious end) | 0.647 | 0.624 | 0.572 | 0.597 |
+| Misleading by ≥ 10×, AI / real | 1.8% / 2.9% | **0.0% / 1.2%** | 3.6% / 0.1% | **1.1% / 0.0%** |
+
+- **v2 overstated its labels on the old test.** Its "moderate" and "moderately strong" were weaker than claimed. Under v3, every label's empirical LR is within or beyond its stated range on both collections.
+- **The price:** more files read LIMITED (holdout AI 52% → 62%), and Cllr on the holdout rises 0.572 → 0.597. That is the intended trade: fewer confident statements, and fewer that point the wrong way.
+- **"AGAINST" on the AI branch remains weak evidence.** On the holdout it still came up for 16 AI images, against 46 real ones (empirical 0.23, against a claimed ≤ 0.1). The statement keeps saying it is not a finding that the image came from a camera.
+
+**What it did not fix.** The coverage floor came out at 256 px because the fitting data includes 256 px COCO files, so the COCO JPEGs are inside it. Two of 34 still get "SUPPORTS moderate" under v3 (5.9%, the same rate as v2). Raising the floor would exclude images the calibration was fitted on, and a separate small-input fit did not help. Coverage is about size only. **Small, heavily compressed files are a known weak spot for the AI-generation ratios.**
+
+**Leakage found.** A pHash check of all sets against each other (§4.10) found one picture in the frozen holdout (`bench2/midjourney_046`, 6 files with its copies) identical to a web **val** file the calibrations were fitted on. One bench2 val file is identical to an old **test** file. Both are single images out of hundreds and cannot move the figures above by more than a rounding error. They are recorded rather than removed: the holdout lock is not edited after the fact.
+
+### 4.9 Small AI-inpainted edits (GLIDE) (2026-10-28)
+
+**Recall falls with the edited area** (TruFor at its 0.5 threshold, CocoGlide, 256×256 px):
+
+| Edited area | PNG | JPEG |
+|---|---|---|
+| 2–5% | 13% (3/23) | 17% |
+| 5–10% | 21% (4/19) | 10% |
+| 10–20% | 35% (7/20) | 18% |
+| > 20% | 53% (20/38) | 35% |
+
+Spearman(area, score) = 0.39. At 256 px, a 5% edit is about 57×57 px.
+
+**Can a different TruFor output separate small edits?** AUC against the authentic COCO images of the same set, for edits under 10% of the image:
+
+| | Integrity score (used now) | Localization-map peak | Map mean |
+|---|---|---|---|
+| PNG, val / test | 0.64 / 0.63 | 0.64 / 0.67 | 0.54 / 0.57 |
+| JPEG, val / test | 0.56 / 0.60 | 0.56 / 0.58 | 0.58 / 0.49 |
+
+All are close to chance. A peak threshold chosen on val, at the integrity flag's val false-positive rate, gave on test 12% recall at 7% false positives (PNG), against 15% at 6% for the current flag. **At an AUC near 0.6, a lower threshold buys recall at almost the same rate in false positives, so TruFor's threshold was not lowered.**
+
+**What would help, not done here.** Small edits need a model that has seen them: a localization model trained or fine-tuned on small inpainted regions, such as CAT-Net v2 or MMFusion (both research-only licences), evaluated on a split of CocoGlide it was not trained on. That requires third-party weights and a licence decision. Until then, a small generative edit is expected to be missed, and "no significant anomalies" must not be read as "not inpainted".
+
+### 4.10 Difficult generators: more independent data (2026-10-28)
+
+**Why.** The holdout has few files from the hardest generators, and every figure so far comes from one source, Wikimedia Commons. Two sets were added: more Commons data (bench3), and a differently sourced set (OpenFake).
+
+**bench3 (Commons, train and val only).** Built with the tools in `EVALUATION.md` §2.2, excluding every uploader already present in another set:
+- **Originals:** 115 DALL-E, 64 GPT-image, 27 Midjourney, 10 Stable Diffusion, 7 Flux, 0 Grok, and 98 reals. The uploader exclusion left no Grok files.
+- **Dedupe:** the pHash check dropped 6 near-duplicates of older files: five pixel-identical DALL-E re-uploads under new titles, and one GPT-image at distance 8.
+- **Results:** B-Free AUC 0.94 on train and 0.96 on val, with 2% false positives on both. GPT-image recall was 41% (train) and 44% (val); Flux 0 of 42. Resize-50 copies lost 21–28 points of recall, as on bench2.
+- **The v3 labels held** on bench3 val: "SUPPORTS moderate" had an empirical LR of 53 (claimed 10–100); none of 270 real files got "moderately strong". Cllr 0.42 at the cautious end.
+
+**OpenFake (different source, evaluation only).** 950 AI images from six recent generators, and 450 real photos: 300 from DOCCI and 150 from ImageNet. Its licence (CC BY-NC) rules out fitting anything on it (`EVALUATION.md` §2.3). These figures are not pooled with Commons.
+
+| | Recall | False positives | AUC |
+|---|---|---|---|
+| All | 33% | 12% (53/450) | 0.59 |
+| Nano Banana Pro | 85% | | 0.94 |
+| Midjourney 7 | 62% | | 0.85 |
+| Grok Aurora | 62% | | 0.84 |
+| GPT-image 1.5 / 2 | 22% / 19% | | 0.53 / 0.57 |
+| FLUX.2-klein | 6% | | **0.32** |
+| DOCCI reals | | **17%** (51/300) | 0.50 against all AI |
+| ImageNet reals | | 1% (2/150) | 0.76 against all AI |
+
+AUC per generator is against all 450 reals.
+
+- **B-Free does not generalise to this set as it does on Commons.** The Commons holdout gave 55% recall at 1% false positives; OpenFake gives 33% at 12%.
+- **DOCCI is the problem on the real side.** B-Free cannot tell DOCCI photos from AI images (AUC 0.50). They are much smoother than the Commons reals: median Laplacian variance 421, against 2,934. Halving them moves their logits *down* by 2.3, the opposite of what it does to Commons reals (§4.7). That is consistent with the photos having been resampled before release, which §4.7 found makes real photos look AI-generated to B-Free. It is not proven.
+- **FLUX.2-klein is ranked below real photos.** This matches Flux at 0 of 42 on bench3.
+- **The fusion ratios carry no information here.** Cllr is 1.08 at the cautious end. "SUPPORTS moderate" reached an empirical LR of 9.3, just under its claimed range. The cautious grading limits the damage: 98% of real files read LIMITED, and 1.6% got a ratio misleading by 10× or more.
+
+**Small inputs: upscale mode replaces tiling.** §4.7 left the default at tile until the upscale offset was fitted on more Commons reals and checked on a second source. Only files under 504 px are affected. Across 5,000 full-size files, the scores in the two modes were identical.
+
+**First fit: +2.31, on resized originals.** Fitted on the 50% copies of bench2 val and bench3 train originals (242 AI, 139 real). The offset is the smallest that holds the reals' false-positive rate at tile mode's (5.0%). Probe results on copies under 504 px:
+
+| Set | Tile: recall, FP | Upscale +2.31: recall, FP | AUC |
+|---|---|---|---|
+| Commons fit | 43%, 5.0% | 65%, 4.3% | 0.85 → 0.91 |
+| bench3 val | 48%, 2.2% | 65%, 2.2% | 0.90 → 0.96 |
+| OpenFake (402 copies under 504 px) | 36%, 11.7% | 44%, 4.9% | 0.65 → 0.80 |
+
+**+2.31 was too high for compressed files.** Through the full pipeline, real "social" copies on the holdout (720 px, JPEG q75, 4:2:0) went from 2 false positives to 7, out of 154. The fit had seen only half-size copies.
+
+An offset scaled by upscale factor was considered and rejected. The fitting copies were mostly about 480 px (upscaled 1.05×), and AI images lost most there (median logit −2.06, reals −0.68). The offset corrects for downscaling that happened before the file arrived, which the size alone does not reveal.
+
+**Final fit: +1.90, on every small bench2 val input.** That covers resized and social copies and small originals (270 AI, 179 real). Same rule: hold tile mode's false-positive rate (2.8%). Through the full pipeline:
+
+| | Tile | Upscale +1.90 |
+|---|---|---|
+| Holdout, all: recall / FP | 55% / 9 of 924 | **60% / 10 of 924** |
+| Holdout, resize-50 | 42% / 6 of 154 | **53% / 3** |
+| Holdout, social | 50% / 2 of 154 | 56% / **5** |
+| bench3 val, all | 68% / 6 of 270 | **75% / 6** |
+| bench3 val, resize-50 | 48% / 1 of 45 | **61% / 1** |
+| OpenFake, all | 33% / 53 of 450 | 33% / 55 |
+
+- **Recall rises on every Commons collection at the same overall false-positive rate.** Holdout AUC 0.887 → 0.891; bench3 val 0.962 → 0.969.
+- **Holdout recall by generator** (tile → upscale): Midjourney 68% → 79%, Grok 18% → 27%, GPT-image 39% → 44%, Imagen/Gemini 31% → 35%. Flux is unchanged (25% → 26%).
+- **Social copies remain the weak spot:** 5 false positives in 154 against tile's 2.
+- **OpenFake barely moves.** Its small files are 154 ImageNet reals and 6 AI images. Two more ImageNet photos were flagged (4 of 154).
+
+**Decision.** The default is now **upscale, offset +1.90** (`BFREE_SMALL_INPUT_MODE`, `BFREE_SMALL_INPUT_LOGIT_OFFSET`). B-Free's version now ends in `.up504o+1.90` for every file. So **a v3 calibration no longer applies to B-Free**: fusion reports its raw score and says why. Use v4, or set `BFREE_SMALL_INPUT_MODE=tile` to keep v3.
+
+**Calibration v4.** Refitted on the same validation runs as v3, with B-Free rerun in upscale mode. One file was removed: the web val image identical to a holdout file (§4.8), so v4 no longer has that leak. At 4.9% false positives on val, B-Free recall is 75% (v3: 66%).
+
+| | v3, tile: holdout / old test / bench3 val / OpenFake | v4, upscale: holdout / old test / bench3 val / OpenFake |
+|---|---|---|
+| Cllr (cautious end) | 0.600 / 0.624 / 0.423 / 1.077 | **0.578 / 0.575 / 0.383** / 1.142 |
+| SUPPORTS moderate, empirical LR | ∞ / 41 / 53 / 9.3 | 108 / 51 / 31 / **5.8** |
+| SUPPORTS moderately strong, AI files | 101 / 7 / 73 / 15 | **241 / 17 / 141** / 28, no real file on any |
+| Misleading by ≥ 10×, AI (cautious) | 1.1% / 0.0% / 0.0% / 0.4% | 1.9% / 1.8% / 0.2% / 2.5% |
+| Misleading by ≥ 10×, real (cautious) | 0.0% / 1.2% / 0.8% / 1.6% | 0.2% / 0.6% / 1.1% / 2.7% |
+
+- **On Commons, v4 is better on every collection.** Cllr is lower, and about twice as many AI images get "moderately strong", with no real file. "Moderate" stays within or above its claimed 10–100.
+- **The price:** "AGAINST moderate" comes up more often. On the holdout it fell on 27 AI and 91 real files (v3: 16 and 46); its empirical LR is 0.19, against a claimed ≤ 0.1. AGAINST on the AI branch was already weak evidence (§4.8), and it remains so.
+- **On OpenFake, v4 is slightly worse, and neither version is usable.** Cllr is above 1 under both, so the ratios carry no information. "SUPPORTS moderate" fell to an empirical 5.8, below its claimed range. "AGAINST moderate" fell on 24 AI images and 1 real one, so on this set it points the wrong way. This is B-Free's failure on OpenFake (above), not something calibration can fix.
+
+### 4.11 End-to-end failure modes and provenance (2026-10-28)
+
+`backend/tests/integration/test_failure_modes_end_to_end.py` drives the real pipeline, API and report generator with a stubbed B-Free runner that misbehaves on demand. It found three defects, all fixed:
+
+| Failure injected | Before | Now |
+|---|---|---|
+| Score of 1.7 or −0.2 | Accepted as COMPLETED; produced AI_GENERATION_INDICATED | FAILED, "invalid score: not a finite probability in [0, 1]"; the runtime rejects any COMPLETED result whose confidence is outside [0, 1] |
+| NaN or infinite logit or score | Reached the JSON response, which then failed to serialize ("Out of range float values are not JSON compliant") | FAILED; non-finite numbers in metadata are replaced by null and listed in `non_finite_values_removed` |
+| A malformed result object | "ValidationError" with no detail | "invalid result from the detector" with the fields named |
+| GPU out of memory | Retried once (already correct) | Unchanged; tested: two calls, and the reason names memory |
+| Timeout | FAILED with a timeout reason (already correct) | Unchanged; tested at 0.5 s |
+| Missing weights | UNAVAILABLE, but **UnivFD (AUC 0.51) then decided the AI branch alone** | UNAVAILABLE with the FileNotFoundError; no AI finding |
+
+**Advisory detectors never decide.** Until now, UnivFD voted when B-Free had no score. With B-Free missing, a chance-level detector was making the call. It is now shown for reference only, always, and the branch reads UNAVAILABLE with that reason. Evidence fusion applies the same rule.
+
+**Every result records how it was reached.** The analysis `config_snapshot` and the evidence package now carry:
+- **Verdict policy:** a version (`2026-10-28.1`), a SHA-256 of the decision functions' source and the decision settings (advisory list, thresholds, B-Free small-input mode and offset, keyframe verdicts, calibration flags), and `advisory_detectors_vote: false`. Two results with the same hash were decided by the same rules.
+- **Calibration files:** path, SHA-256 and the detector versions inside, for both the verdict calibration and the fusion calibration.
+- **Detector statuses:** for every detector, its version, availability, execution status, reason, score semantics and calibration summary, including those that failed or never ran.
+
+The Markdown and HTML reports gain a section, "9. Run Provenance", with the software and detector-set versions, the verdict-policy version and hash prefix, both calibration hashes, and the detector status table. The tests check that each of these survives into the package and the report when a detector has failed.
+
+**The test suite itself** had an order-dependent failure: the per-user daily upload quota counted uploads across the whole session's test database, so later files hit HTTP 429. The quota is now lifted for tests that are not about it, the same way the rate limiter already was. Full suite: 747 passed, 2 skipped.
+
 ## 5. What to rely on, and what not to
 
 **Rely on:**
@@ -372,8 +556,9 @@ Recompression and cropping barely matter. Downscaling is the damaging transform:
 
 **Don't rely on:**
 - **"No significant anomalies"** as evidence of authenticity. It missed 20% of controlled edits, 66% of generative inpaintings and 78% of recompressed ones, which is what the product wording already says.
-- **"AI generation not indicated", or AGAINST on the AI-generation branch.** On the frozen holdout (§4.6), B-Free missed 45% of AI images: 61% of GPT-image, 75% of Flux and 82% of Grok images. Halving an image's size costs a further 17 points of recall.
-- **"Possible AI generation" on a photo, from UnivFD.** It is more often a sign of editing (§3.3). B-Free flagged 2 of 36 edited photos (§4.3), and UnivFD no longer votes when B-Free has a score.
+- **"AI generation not indicated", or AGAINST on the AI-generation branch.** On the frozen holdout (§4.6), B-Free missed 45% of AI images: 61% of GPT-image, 75% of Flux and 82% of Grok images. With upscale mode (§4.10) it misses 40%, and halving an image's size costs a further 8 points of recall (tile mode: 17).
+- **AI-generation verdicts on images unlike the Commons data.** On OpenFake (§4.10), B-Free flagged 17% of DOCCI camera photos and found 6% of FLUX.2 images. Its AUC there was 0.59.
+- **"Possible AI generation" on a photo, from UnivFD.** It is more often a sign of editing (§3.3). B-Free flagged 2 of 36 edited photos (§4.3), and UnivFD never votes (§4.11).
 - **Any video verdict.** None is ever reached.
 - **"Limited" as a finding either way.** It means the detectors barely discriminate on this file.
 - **Multi-detector corroboration, except for copy-moves.** Until §4.4 no manipulation detector other than TruFor fired in 502 images. The fixed copy-move detector now corroborates TruFor on clones, and nothing else does yet.

@@ -79,6 +79,27 @@ The first set has 15 GPT-image and 7 Grok/Flux files, no transformed copies, and
 - **Transformed copies.** Each original also appears as `jpeg_q70`, `resize_50`, `crop_80`, `webp_q75` and `social` (720 px, JPEG q75, 4:2:0). These are ordinary things that happen to an image after it leaves the generator. Copies share their original's group, so they are always in the same split. Metrics break down by `tag=`.
 - **Provenance.** Every item records its Commons page, uploader, licence and SHA-256.
 
+**Adding a set after the holdout is frozen** (bench3):
+
+```
+python scripts/build_benchmark.py --out sets/bench3 --seed aimd-bench3-v1 crawl
+python scripts/build_benchmark.py --out sets/bench3 --seed aimd-bench3-v1 fetch --per-generator 120 \
+    --exclude sets/bench2/manifest.split.json sets/web/manifest.split.json sets/coco/manifest.split.json --exclude-uploaders
+python scripts/build_benchmark.py --out sets/bench3 dedupe --against <every other manifest, holdout included>
+python scripts/build_benchmark.py --out sets/bench3 --seed aimd-bench3-v1 transform
+python scripts/build_benchmark.py --out sets/bench3 --seed aimd-bench3-v1 split --train 0.5 --no-holdout
+```
+
+- **`--exclude-uploaders`** skips every uploader already present in an excluded manifest, not only their files. Otherwise a new set would share sources with the frozen holdout.
+- **`dedupe`** compares perceptual hashes (pHash, Hamming distance ≤ 8 by default). It drops any original that is a near-duplicate of a file in another set, and puts near-duplicates within the set into one group. It runs before `transform`, and refuses afterwards. Title and uploader checks are not enough: in bench3 it caught five pixel-identical DALL-E re-uploads of older test files under new titles. The results are in `dedupe.json`.
+- **`split --no-holdout`** assigns train and val only. The frozen holdout stays the one set for final comparisons.
+
+### 2.3 OpenFake: a differently sourced set, for evaluation only
+
+`scripts/fetch_openfake.py` samples the OpenFake test split (Hugging Face, `ComplexDataLab/OpenFake`) into `sets/openfake`: recent generators (GPT-image 1.5 and 2, FLUX.2, Grok Aurora, Nano Banana Pro, Midjourney 7) and real photos (DOCCI, ImageNet). It reads only the parquet row groups it needs, verifies each image's SHA-256, and keeps files with a short side of at least 256 px.
+
+**Licence: CC BY-NC 4.0.** The images stay local. They are never committed, redistributed, used for training, or used to fit anything that is committed: no calibration, threshold or offset. OpenFake results are reported as a separate collection, never pooled with Commons figures. Commons remains the basis for every committed fit.
+
 ## 3. Run
 
 ```
@@ -155,7 +176,15 @@ FUSION_CALIBRATION_PATH=models/fusion-calibration.json   # quantifies evidence; 
 
 Several runs are merged by file id. One run can hold some detectors' results and another run the rest.
 
+**A calibration belongs to one B-Free mode.** B-Free's version names its small-input mode and offset (`.up504o+1.90` for the default). After changing either, rerun B-Free (`--only BFreeDetector`) on the validation sets and fit again. Leave the older runs' B-Free results out of the fit, or `calibrate` skips B-Free for mixing versions. The current fit (v4) and how it was made are in `RELIABILITY_REPORT.md` §4.10.
+
 Each record notes `independent_positives` and `independent_negatives`: distinct originals, with a file's transformed copies counted once. Fusion caps its likelihood ratios on those counts.
+
+**Uncertainty and coverage.** Each calibration also stores:
+- **200 bootstrap refits** that resample whole groups, so the copies of one image are one draw. Fusion turns them into a 5th–95th percentile interval per ratio, and grades status and strength on the end nearer 1.
+- **Coverage:** the 5th percentile of the fitting images' short side. A file below it gets a direction, not a number.
+
+Runs saved before records kept `image_size` need `--manifest <manifests>`, so that `calibrate` can read the sizes from the files. Without sizes the coverage is recorded as unknown, and no file is excluded.
 
 `calibrate` fits the copy-move detector by **flag rate**, P(fires | edited) against P(fires | genuine), with add-one-half smoothing. Its score is 0 on almost every file, and a sigmoid through that is flat. Every other detector is fitted with Platt scaling.
 
@@ -163,7 +192,7 @@ Each record notes `independent_positives` and `independent_negatives`: distinct 
 - `FUSION_CALIBRATION_PATH`: the file is used only to turn detector outputs into likelihood ratios for `evidence_fusion`.
 - `CALIBRATION_PATH`: also changes detector flags. Fusion falls back to it when `FUSION_CALIBRATION_PATH` is unset.
 
-**How to judge fusion.** Judge on test or holdout with **Cllr** (log-LR cost; below 1 means the ratios carry information) and the rate of ratios of 10× or more pointing the wrong way. Results for the current calibrations are in `RELIABILITY_REPORT.md` §4.5.
+**How to judge fusion.** Judge on test or holdout with **Cllr** (log-LR cost; below 1 means the ratios carry information) and the rate of ratios of 10× or more pointing the wrong way. Results for the current calibrations are in `RELIABILITY_REPORT.md` §4.5 and §4.8.
 
 ## 7. Targets
 
