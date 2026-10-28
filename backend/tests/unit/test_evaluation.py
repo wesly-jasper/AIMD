@@ -197,7 +197,10 @@ def _result(detector, detected, score, status=DetectorExecutionStatus.COMPLETED,
     )
 
 
-def test_runner_verdicts_are_the_pipeline_verdicts(tmp_path):
+def test_runner_verdicts_are_the_pipeline_verdicts(tmp_path, monkeypatch):
+    from app.core.config import settings
+
+    monkeypatch.setattr(settings, "ai_generation_advisory_detectors", [])  # UnivFD is the stub AI detector
     items = load_manifest(_dataset(tmp_path, n_groups=1))
     edited = next(i for i in items if i.label == "manipulated")
     engine = _Engine([
@@ -369,14 +372,15 @@ def test_advisory_detector_is_shown_but_does_not_vote(monkeypatch):
     assert out["status"] == "NOT_INDICATED"
 
 
-def test_advisory_detector_votes_when_it_is_the_only_one_scored(monkeypatch):
+def test_advisory_detector_does_not_decide_even_when_it_is_the_only_one_scored(monkeypatch):
     from app.core.config import settings
     from app.services.orchestration.analysis_pipeline import AnalysisPipeline
 
     monkeypatch.setattr(settings, "ai_generation_advisory_detectors", ["UnivFDDetector"])
     out = AnalysisPipeline._decide_ai_generation([_ai_row("UnivFDDetector", True, 0.9)])
-    assert out["status"] == "AI_GENERATION_INDICATED"
-    assert out["detectors"][0]["voting"] is True
+    assert out["status"] == "UNAVAILABLE"
+    assert out["detectors"][0]["voting"] is False
+    assert "for reference only" in out["rationale"]
 
 
 def test_platt_fit_does_not_diverge_on_saturated_weak_scores():

@@ -29,6 +29,14 @@ client = TestClient(app)
 LIMITATIONS = ["global score, no localisation", "uncalibrated"]
 
 
+@pytest.fixture(autouse=True)
+def univfd_decides(monkeypatch):
+    """These tests are about the branch, with UnivFD as its only detector, so it must vote."""
+    from app.core.config import settings
+
+    monkeypatch.setattr(settings, "ai_generation_advisory_detectors", [])
+
+
 @pytest.fixture
 def db():
     with SessionLocal() as session:
@@ -206,7 +214,7 @@ def test_api_reports_both_branches_and_the_verified_copy(monkeypatch):
     body = client.get(f"/api/v1/analysis/{run.json()['analysis_id']}").json()
 
     branch = body["ai_generation"]
-    assert branch["status"] in ("AI_GENERATION_INDICATED", "NOT_INDICATED", "UNAVAILABLE")
+    assert branch["status"] in ("AI_GENERATION_INDICATED", "NOT_INDICATED", "CONFLICTING", "UNAVAILABLE")
     assert body["assessment"] != "LIKELY_AI_GENERATED"
     assert body["assessment_detail"]["category"] == body["assessment"]
 

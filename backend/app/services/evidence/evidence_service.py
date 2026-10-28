@@ -302,6 +302,15 @@ class EvidenceService:
             "similarity_evidence": similarity_evidence,
             "ai_generation_evidence": ai_generation_evidence,
             "evidence_fusion": (assessment_record.evidence_fusion if assessment_record else None),
+            # How this result was produced: the software, the detector set, the
+            # verdict policy and calibration files, and every detector's status.
+            "run": {
+                "software_version": analysis.software_version,
+                "detector_set_version": analysis.detector_set_version,
+                "config_snapshot": analysis.config_snapshot,
+                "duration_ms": analysis.duration_ms,
+            },
+            "detector_statuses": [self._detector_status(d) for d in detections],
             "source_evidence": source_evidence,
             "provenance_timeline": provenance_timeline,
             "provenance_evidence": provenance_evidence,
@@ -310,6 +319,25 @@ class EvidenceService:
             "overall_assessment": analysis.assessment,
             "evidence_strength": analysis.evidence_strength,
             "generated_at": datetime.now(timezone.utc).isoformat(),
+        }
+
+    @staticmethod
+    def _detector_status(d) -> dict[str, Any]:
+        meta = d.detector_metadata or {}
+        calibration = meta.get("calibration") or {}
+        return {
+            "detector": d.detector,
+            "detector_version": d.detector_version,
+            "availability": _plain(d.availability),
+            "execution_status": _plain(d.execution_status),
+            "status_reason": d.status_reason,
+            "score_semantics": _plain(d.score_semantics),
+            "calibration": (
+                {"applied": bool(calibration.get("applied")), "method": calibration.get("method"),
+                 "created_at": calibration.get("created_at"), "fitted_on": calibration.get("fitted_on"),
+                 "reason": calibration.get("reason")}
+                if calibration else None
+            ),
         }
 
     def _collect_limitations(self, detections, sources, analysis) -> list[str]:

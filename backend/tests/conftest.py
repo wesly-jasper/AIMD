@@ -186,12 +186,19 @@ def rate_limits_off_by_default(request):
     that say nothing about the code under test. Tests marked ``rate_limited``
     get the limiter on, with counters reset before and after so no test inherits
     another's spent budget.
+
+    The daily upload quota counts rows in the shared test database, so it is
+    lifted the same way; the test of the quota sets its own limit.
     """
+    from app.core.config import settings
     from app.core.rate_limit import limiter
 
     enabled = "rate_limited" in request.keywords
     previous = limiter.enabled
+    previous_quota = settings.daily_upload_limit
     limiter.enabled = enabled
+    if not enabled:
+        settings.daily_upload_limit = 1_000_000
     if enabled:
         limiter.reset()
     try:
@@ -200,3 +207,4 @@ def rate_limits_off_by_default(request):
         if enabled:
             limiter.reset()
         limiter.enabled = previous
+        settings.daily_upload_limit = previous_quota

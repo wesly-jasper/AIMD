@@ -1,4 +1,5 @@
 import logging
+import math
 import time
 from pathlib import Path
 from typing import Any, Optional
@@ -75,6 +76,14 @@ class UnivFDDetector(BaseDetector):
         except Exception as exc:
             logger.warning("%s inference failed", self.model_label, exc_info=True)
             return self.failed_from(f"{self.model_label} inference failed", exc)
+        # A broken model or a numerical fault must not become a finding: NaN
+        # compares False against every threshold, which would read as "not
+        # indicated", and a clamped 1.7 would read as certain.
+        if not (math.isfinite(score) and math.isfinite(logit) and 0.0 <= score <= 1.0):
+            logger.warning("%s returned an invalid score (score=%r, logit=%r)", self.model_label, score, logit)
+            return self.failed(
+                f"{self.model_label} returned an invalid score: not a finite probability in [0, 1]"
+            )
 
         metadata = {
             **dict(result.get("metadata", {})),

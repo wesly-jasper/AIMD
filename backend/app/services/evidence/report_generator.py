@@ -311,6 +311,7 @@ class ReportGenerator:
         else:
             lines.append("- No specific operational limitations recorded.")
 
+        lines.extend(self._provenance_lines(evidence_package))
         lines.extend([
             "",
             "---",
@@ -319,6 +320,48 @@ class ReportGenerator:
         ])
 
         return "\n".join(lines)
+
+    @staticmethod
+    def _provenance_lines(package: Dict[str, Any]) -> list[str]:
+        """Section 9: what produced this result, so it can be reproduced or challenged."""
+        run = package.get("run") or {}
+        config = run.get("config_snapshot") or {}
+        policy = config.get("verdict_policy") or {}
+        lines = ["", "---", "", "## 9. Run Provenance", ""]
+        lines.append(f"- **Software version:** `{run.get('software_version') or 'not recorded'}`")
+        lines.append(f"- **Detector set:** `{run.get('detector_set_version') or 'not recorded'}`")
+        if policy:
+            lines.append(
+                f"- **Verdict policy:** version `{policy.get('version')}`, rules "
+                f"`{(policy.get('rules_sha256') or '')[:12]}`; advisory detectors "
+                f"{'vote' if policy.get('advisory_detectors_vote') else 'never decide'}"
+            )
+        else:
+            lines.append("- **Verdict policy:** not recorded (analysed before policies were recorded)")
+        files = config.get("calibration_files") or {}
+        for key, label in (("calibration_path", "Calibration applied to detector flags"),
+                           ("fusion_calibration_path", "Calibration used for evidence strength")):
+            entry = files.get(key)
+            if not entry:
+                lines.append(f"- **{label}:** none")
+            elif entry.get("error"):
+                lines.append(f"- **{label}:** `{entry.get('path')}` could not be read ({entry['error']})")
+            else:
+                fitted = ", ".join(f"{d} {v}" for d, v in sorted((entry.get("detectors") or {}).items()))
+                lines.append(f"- **{label}:** sha256 `{entry['sha256'][:12]}` ({fitted or 'no detectors'})")
+        statuses = package.get("detector_statuses") or []
+        if statuses:
+            lines.extend(["", "| Detector | Version | Availability | Execution | Calibration | Reason |",
+                          "|---|---|---|---|---|---|"])
+            for s in statuses:
+                cal = s.get("calibration") or {}
+                cal_text = ("applied" if cal.get("applied") else "not applied") if cal else "none"
+                reason = (s.get("status_reason") or "").replace("|", "/")
+                lines.append(
+                    f"| {s.get('detector')} | `{s.get('detector_version') or '-'}` | {s.get('availability')} "
+                    f"| {s.get('execution_status')} | {cal_text} | {reason} |"
+                )
+        return lines
 
     @staticmethod
     def _score_text(value: Any, semantics: Any, metadata: Dict[str, Any]) -> str:

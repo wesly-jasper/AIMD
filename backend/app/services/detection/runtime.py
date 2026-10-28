@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import gc
 import logging
+import math
 import threading
 import time
 import weakref
@@ -294,6 +295,41 @@ def _call_with_timeout(detector: Any, file_path: Path, timeout_s: float) -> Dete
     return result
 
 
+def _finite_metadata(value: Any, path: str, bad: list[str]) -> Any:
+    """``value`` with every non-finite float replaced by None; their paths go in ``bad``."""
+    if isinstance(value, float) and not math.isfinite(value):
+        bad.append(path)
+        return None
+    if isinstance(value, dict):
+        return {k: _finite_metadata(v, f"{path}.{k}" if path else str(k), bad) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_finite_metadata(v, f"{path}[{i}]", bad) for i, v in enumerate(value)]
+    return value
+
+
+def _validated(detector: Any, result: DetectionResult) -> DetectionResult:
+    """
+    The last check before a result is stored, for every detector alike.
+
+    A completed result must carry a finite confidence in [0, 1]; otherwise it
+    becomes FAILED, since a number that is not one cannot support a finding.
+    Non-finite numbers anywhere in the metadata become None and are listed:
+    they are not JSON, and one would break the API and every report.
+    """
+    bad: list[str] = []
+    result.metadata = _finite_metadata(dict(result.metadata or {}), "", bad)
+    if bad:
+        result.metadata["non_finite_values_removed"] = bad
+    confidence = result.confidence
+    if result.execution_status is DetectorExecutionStatus.COMPLETED and not (
+        isinstance(confidence, (int, float)) and math.isfinite(confidence) and 0.0 <= confidence <= 1.0
+    ):
+        logger.warning("Detector %s returned an invalid confidence %r", type(detector).__name__, confidence)
+        return _failure(detector, "invalid result: confidence is not a finite number in [0, 1]",
+                        invalid_result=True)
+    return result
+
+
 def _attempt(detector: Any, file_path: Path, timeout_s: float) -> tuple[DetectionResult, bool, bool]:
     """One run: ``(result, timed_out, memory_error)``. Never raises."""
     name = type(detector).__name__
@@ -305,13 +341,20 @@ def _attempt(detector: Any, file_path: Path, timeout_s: float) -> tuple[Detectio
     except Exception as exc:
         logger.warning("Detector %s failed", name, exc_info=True)
         memory = is_memory_error(exc)
-        reason = f"{type(exc).__name__}: detector execution failed"
+        if type(exc).__name__ == "ValidationError":
+            # The detector built a DetectionResult that breaks the contract --
+            # most often a non-finite score. Name the fields, not the values.
+            fields = sorted({".".join(map(str, e.get("loc", ()))) for e in getattr(exc, "errors", lambda: [])()})
+            reason = f"invalid result from the detector ({', '.join(fields) or 'unknown field'})"
+        else:
+            reason = f"{type(exc).__name__}: detector execution failed"
         if memory:
             reason += " (out of memory)"
         # AVAILABLE + FAILED, not UNAVAILABLE: the detector was present and was
         # invoked; it raised. Recording this as UNAVAILABLE would disguise a
         # defect in our code as an absent dependency.
         return _failure(detector, reason, memory_error=memory), False, memory
+    result = _validated(detector, result)
     memory = (
         result.execution_status is DetectorExecutionStatus.FAILED
         and bool(result.metadata.get("memory_error"))

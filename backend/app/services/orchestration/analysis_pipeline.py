@@ -66,6 +66,14 @@ _SUSPICIOUS_VALUES = {
     Assessment.LIKELY_AI_GENERATED.value,
 }
 
+#: Bumped by hand whenever a verdict rule changes meaning. ``rules_sha256`` in
+#: the recorded policy also changes with any edit to the rule code, so a
+#: forgotten bump is still visible.
+VERDICT_POLICY_VERSION = "2026-10-28.1"
+#: The code that turns detector results into the recorded categories.
+_POLICY_FUNCTIONS = ("_decide", "_decide_ai_generation", "_with_edit_note", "_ai_entry")
+
+
 #: Settings that change what an analysis can observe, recorded on every run.
 #: An allow-list, not a deny-list: a new setting holding a credential must not
 #: reach the database merely because nobody remembered to exclude it.
@@ -77,8 +85,11 @@ _CONFIG_SNAPSHOT_KEYS = (
     "univfd_threshold",
     "bfree_enabled",
     "bfree_threshold",
+    "bfree_small_input_mode",
+    "bfree_small_input_logit_offset",
     "ai_generation_advisory_detectors",
     "calibration_path",
+    "fusion_calibration_path",
     "video_keyframe_verdicts_enabled",
     "detector_timeout_seconds",
     "detector_retry_on_memory_error",
@@ -1081,12 +1092,31 @@ class AnalysisPipeline:
                 "detectors": [e["public"] for e in entries],
             }
 
-        # An advisory detector is shown but does not vote while a stronger one
-        # on the branch has scored (settings.ai_generation_advisory_detectors).
+        # An advisory detector is shown but never votes
+        # (settings.ai_generation_advisory_detectors). It does not step in when
+        # the voting detector is missing either: UnivFD, the advisory one, scored
+        # AUC 0.51 on the second benchmark, so a fallback to it would turn a
+        # missing model into a coin toss.
         advisory = set(settings.ai_generation_advisory_detectors or ())
-        voting = [e for e in scored if e["detector"] not in advisory] or scored
+        voting = [e for e in scored if e["detector"] not in advisory]
         for e in entries:
             e["public"]["voting"] = e in voting
+        if not voting:
+            shown = ", ".join(e["detector"] for e in scored)
+            missing = [e for e in entries if e["detector"] not in advisory]
+            first = missing[0] if missing else scored[0]
+            return {
+                **first["base"],
+                "status": "UNAVAILABLE",
+                "reason": first["reason"] or "no voting AI-generation detector produced a score",
+                "rationale": (
+                    "No AI-generation detector that decides this branch produced a score"
+                    + (f" ({first['detector']}: {first['reason']})" if missing and first["reason"] else "")
+                    + f". {shown} is shown for reference only; it does not decide, being "
+                    "markedly less accurate on the evaluation sets."
+                ),
+                "detectors": [e["public"] for e in entries],
+            }
         scored = voting
 
         indicated = [e for e in scored if e["status"] == "AI_GENERATION_INDICATED"]
@@ -1353,7 +1383,68 @@ class AnalysisPipeline:
             elif not isinstance(value, (bool, int, float, str, type(None))):
                 value = str(value)
             snapshot[key] = value
+        snapshot["calibration_files"] = AnalysisPipeline._calibration_files()
+        snapshot["verdict_policy"] = AnalysisPipeline._verdict_policy()
         return snapshot
+
+    @staticmethod
+    def _calibration_files() -> dict:
+        """Content hash and fitted detector versions of each calibration file in use."""
+        from app.services.detection.calibration import calibrations_at
+
+        files = {}
+        for key in ("calibration_path", "fusion_calibration_path"):
+            path = getattr(settings, key, None)
+            if not path:
+                files[key] = None
+                continue
+            path = Path(path)
+            try:
+                digest = hashlib.sha256(path.read_bytes()).hexdigest()
+            except OSError as exc:
+                files[key] = {"path": str(path), "error": type(exc).__name__}
+                continue
+            files[key] = {
+                "path": str(path),
+                "sha256": digest,
+                "detectors": {name: c.detector_version for name, c in calibrations_at(path).items()},
+            }
+        return files
+
+    @staticmethod
+    def _verdict_policy() -> dict:
+        """
+        Which rules made the categories: a version, and a hash over the rule
+        code, the signal-family map and every setting the rules read.
+        """
+        import inspect
+
+        from app.services.detection.engine.image_detection_engine import _SIGNAL_FAMILY
+
+        parts = []
+        for name in _POLICY_FUNCTIONS:
+            fn = getattr(AnalysisPipeline, name)
+            try:
+                parts.append(inspect.getsource(fn))
+            except (OSError, TypeError):  # no source shipped: hash the bytecode
+                parts.append(getattr(fn, "__code__", fn).co_code.hex())
+        decision_settings = {
+            "ai_generation_advisory_detectors": sorted(settings.ai_generation_advisory_detectors or ()),
+            "bfree_threshold": settings.bfree_threshold,
+            "bfree_small_input_mode": settings.bfree_small_input_mode,
+            "bfree_small_input_logit_offset": settings.bfree_small_input_logit_offset,
+            "univfd_threshold": settings.univfd_threshold,
+            "video_keyframe_verdicts_enabled": settings.video_keyframe_verdicts_enabled,
+            "calibration_applied_to_flags": bool(settings.calibration_path),
+        }
+        parts.append(json.dumps(_SIGNAL_FAMILY, sort_keys=True))
+        parts.append(json.dumps(decision_settings, sort_keys=True))
+        return {
+            "version": VERDICT_POLICY_VERSION,
+            "rules_sha256": hashlib.sha256("\n".join(parts).encode("utf-8")).hexdigest(),
+            "decision_settings": decision_settings,
+            "advisory_detectors_vote": False,
+        }
 
     @staticmethod
     def _detector_set_version(detections: list) -> Optional[str]:
